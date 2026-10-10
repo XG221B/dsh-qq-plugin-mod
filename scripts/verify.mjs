@@ -129,6 +129,134 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
 }
 
+// ---- 切换模型：`/model` 的两条行为（列出 / 切换）---------------------------
+// `/model` 是本项目第一个**参数可选**的指令，也是模型功能的用户入口；
+// 工具的 `model` action 复用同一个路由（见 `runtime.controlSession`），
+// 所以这一节把两种输入形态与失败路径都钉住。
+{
+  const r = await import('../lib/router.js')
+
+  const models = [
+    { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-chat', name: 'DeepSeek Chat' },
+    { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+    { provider: 'other', providerName: 'Other', model: 'gpt-x', name: 'GPT X' },
+  ]
+
+  // splitCommand：空参数必须落进"没有参数"这一支，而 `/models` 不能被吃成 `/model` + `s`
+  check('★ "/model" 无参数', JSON.stringify(r.splitCommand('/model')), JSON.stringify({ command: '/model', args: '' }))
+  check('"/model 名字"', JSON.stringify(r.splitCommand('/model deepseek-chat')), JSON.stringify({ command: '/model', args: 'deepseek-chat' }))
+  check('"/model:名字" 冒号也认', JSON.stringify(r.splitCommand('/model:gpt-x')), JSON.stringify({ command: '/model', args: 'gpt-x' }))
+  check('★ "/model2" 编号粘连可用（手机键盘）', JSON.stringify(r.splitCommand('/model2')), JSON.stringify({ command: '/model', args: '2' }))
+  check('★ "/model中文名" 粘连可用', JSON.stringify(r.splitCommand('/model中文名')), JSON.stringify({ command: '/model', args: '中文名' }))
+  check('★ "/modelgpt" 不是 /model（不能被吃成 /model + gpt）', JSON.stringify(r.splitCommand('/modelgpt')), JSON.stringify({ command: '/modelgpt', args: '' }))
+  check('★ "/models" 不是 /model', JSON.stringify(r.splitCommand('/models')), JSON.stringify({ command: '/models', args: '' }))
+
+  // resolveModel：与 resolveTarget 同一条原则——有歧义必须失败
+  check('编号', r.resolveModel('2', models)?.model, 'deepseek-reasoner')
+  check('精确 id', r.resolveModel('deepseek-chat', models)?.model, 'deepseek-chat')
+  check('★ 精确显示名（大小写不敏感）', r.resolveModel('gpt x', models)?.model, 'gpt-x')
+  check('★ provider/model 形式', r.resolveModel('other/gpt-x', models)?.model, 'gpt-x')
+  check('★ 唯一子串', r.resolveModel('reasoner', models)?.model, 'deepseek-reasoner')
+  check('★ 有歧义必须失败', r.resolveModel('deepseek', models), undefined)
+  check('找不到时 undefined', r.resolveModel('不存在的模型', models), undefined)
+  check('空参数 undefined', r.resolveModel('   ', models), undefined)
+  check('编号越界不误配', r.resolveModel('99', models), undefined)
+
+  // renderModelList：编号必须能被 `/model <编号>` 选到（与 /list 同一份编号契约）
+  const listText = r.renderModelList(models, { provider: 'deepseek-account', model: 'deepseek-chat' })
+  check('列表标出当前模型', listText.includes('← 当前'), true)
+  check('列表有编号与显示名', listText.includes('1. DeepSeek Chat'), true)
+  check('列表点出提供方', listText.includes('deepseek-account'), true)
+  check('列表给出切换提示', listText.includes('回复名字或编号即可切换'), true)
+  check('★ 编号空间一致：清单第 2 行就是 /model 2 选中的那个', listText.includes('2. DeepSeek Reasoner') && r.resolveModel('2', models) === models[1], true)
+  check('★ 空目录有明确说明而不是空回复', r.renderModelList([], undefined).includes('宿主没有报出可用的模型'), true)
+  check('★ 帮助里列出了 /model', r.HELP_TEXT.includes('/model'), true)
+  check('★ 帮助里说明 /model 带参数是切换', r.HELP_TEXT.includes('/model <名字>'), true)
+
+  // 路由端到端：/model 无参 = 列出；有参 = 切换；宿主拒绝 = 如实说失败
+  const calls = []
+  const binding = {
+    conversationId: '111:peer',
+    accountId: '111',
+    peerId: 'peer',
+    sessionId: 'session-aaaaaaaa-1111',
+    title: 'QQ',
+    createdAt: 1,
+    lastUsedAt: 1,
+  }
+  const makeRouter = (overrides = {}) => {
+    let bindings = { '111:peer': { ...binding } }
+    return {
+      router: new r.SessionRouter({
+        gateway: {
+          ensureSession: async () => {},
+          prompt: async () => {},
+          listSessions: async () => [],
+          listOwnSessions: async () => [],
+          cancel: async () => {},
+          listModels: async () => models,
+          currentModel: async () => ({ provider: 'other', model: 'gpt-x' }),
+          selectModel: async (sessionId, provider, model) => {
+            calls.push([sessionId, provider, model])
+            return { provider, model }
+          },
+          ...overrides,
+        },
+        store: {
+          load: async () => bindings,
+          save: async (next) => {
+            bindings = next
+          },
+        },
+        titlePrefix: 'QQ',
+      }),
+    }
+  }
+  const routeWith = (router, text) => router.route({ conversationId: '111:peer', accountId: '111', peerId: 'peer', text })
+
+  const listing = await routeWith(makeRouter().router, '/model')
+  check('★ /model 无参数 = 列出（不切换）', calls.length, 0)
+  check('列出的是模型而不是对话', listing.text.includes('共 3 个可用模型'), true)
+  check('列表里标出了当前模型', listing.text.includes('← 当前'), true)
+
+  const switched = await routeWith(makeRouter().router, '/model 1')
+  check('★ /model 1 = 切到清单里第 1 个', JSON.stringify(calls), JSON.stringify([['session-aaaaaaaa-1111', 'deepseek-account', 'deepseek-chat']]))
+  check('切换有确认文案（带 provider/model）', switched.text.includes('已切换模型：deepseek-account/deepseek-chat'), true)
+  check('★ 确认文案说明"对下一步生效"（不谎称对正在跑的那步生效）', switched.text.includes('对下一步生效'), true)
+
+  calls.length = 0
+  await routeWith(makeRouter().router, '/model GPT X')
+  check('★ 按显示名切换', JSON.stringify(calls.at(-1)), JSON.stringify(['session-aaaaaaaa-1111', 'other', 'gpt-x']))
+
+  calls.length = 0
+  const missing = await routeWith(makeRouter().router, '/model 不存在的模型')
+  check('★ 找不到的模型不切换', calls.length, 0)
+  check('找不到时以「找不到」开门见山', missing.text.startsWith('找不到这个模型'), true)
+  check('找不到时附上清单', missing.text.includes('共 3 个可用模型'), true)
+
+  calls.length = 0
+  const refused = await routeWith(
+    makeRouter({
+      selectModel: async () => {
+        throw new Error('Select an available model before sending a message.')
+      },
+    }).router,
+    '/model 1',
+  )
+  check('★ 宿主拒绝时如实说失败（不假装切了）', refused.text.startsWith('切换模型没有成功'), true)
+  check('★ 失败文案带上宿主给的原因', refused.text.includes('Select an available model'), true)
+  check('★ 失败文案给出下一步', refused.text.includes('/model'), true)
+
+  // 没有对话时不能凭空调模型（模型的归属是会话）
+  const noBinding = new r.SessionRouter({
+    gateway: { ensureSession: async () => {}, prompt: async () => {}, listSessions: async () => [], listOwnSessions: async () => [], cancel: async () => {}, listModels: async () => models },
+    store: { load: async () => ({}), save: async () => {} },
+    titlePrefix: 'QQ',
+  })
+  const orphan = await routeWith(noBinding, '/model')
+  check('★ 没有对话时 /model 不硬造一个会话', orphan.text.includes('当前没有对话'), true)
+}
+
 // ---- 会话索引：目录编码是实测出来的精确字符串 ------------------------------
 {
   const si = await import('../lib/session-index.js')
@@ -195,7 +323,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     log: () => {},
   })
   check('★ 工具名带 qq_ 前缀（避免与微信的 session_control 重名）', def.name, 'qq_session_control')
-  check('action 枚举完整', JSON.stringify(def.parameters.properties.action.enum), JSON.stringify(['list', 'switch', 'new', 'current', 'cancel']))
+  check('action 枚举完整', JSON.stringify(def.parameters.properties.action.enum), JSON.stringify(['list', 'switch', 'new', 'current', 'cancel', 'model']))
   check('action 必填', JSON.stringify(def.parameters.required), JSON.stringify(['action']))
   check('output 声明 detail/ok', JSON.stringify(def.output.schema.required), JSON.stringify(['detail', 'ok']))
   check('output.schema 含 otherWorkspaces', def.output.schema.properties.otherWorkspaces.type, 'number')
@@ -204,6 +332,10 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   const off = st.sessionToolDescription(false)
   check('★ 确认策略在描述里（关）', !off.includes('IMPORTANT') && off.includes('confirmation off'), true)
   check('描述要求不要复述结果', def.description.includes('do not repeat that outcome'), true)
+  // 模型：列清单与切换同用一个 action，靠有没有 target 区分；只读的那半边不必先确认。
+  check('★ target 描述说明 model 可以省略（省略=列出）', def.parameters.properties.target.description.includes('omit it to list the models'), true)
+  check('★ 只读的模型列表被列进"不必先确认"的例外', def.description.includes('action "model" without'), true)
+  check('★ 描述说明切换对下一步生效、不是对正在跑的那一步', def.description.includes('applies from the next step'), true)
 
   check('新建确认文案（有标题）', st.switchConfirmation('new', '测试会话'), '已新建对话「测试会话」，从现在起你的消息发到这里。')
   check('新建确认文案（无标题）', st.switchConfirmation('new', ''), '已新建对话，从现在起你的消息发到这里。')
@@ -455,6 +587,235 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ requireConfirmation 被持久化', restored.requireConfirmation, false)
     check('★ allowCrossSessionNotify 被持久化', restored.allowCrossSessionNotify, false)
     check('★ settleMs 被持久化', restored.settleMs, 700)
+
+    /*
+     * ---- ★★ 权限预设 setter 必须落盘（用户报的"设置不会保存"）★★ ----
+     *
+     * 这里钉的是一个**已经发生过**的故障：设置页切预设走的是独立路由
+     * `POST /permission-preset`，那条路只调用 `setPermissionPreset()`。
+     * 它当时只改内存 + 打日志、从不写盘，于是界面显示成功、状态文件里还是旧值，
+     * **重启就回退**。根因与排查过程见 `runtime.js` 里那段注释。
+     *
+     * ## 为什么这几条断言抓得住它
+     *
+     * 盘上先放一个**不同的**旧值，然后：
+     *
+     * - 正确路径（`setPermissionPreset('x')`）之后，**换一个实例从同一份文件读回**必须得到新值；
+     * - 故障路径（`setPermissionPreset('x', { persist:false })`）之后，同样的"读回"必须得到旧值。
+     *
+     * `{ persist:false }` 与"把 `if (persist)` 那一行删掉"产生**完全相同的可观测状态**
+     * （内存变了、盘上没变），所以这两条合起来就是一个自动化的反向对照：
+     * 少了落盘那一句，第一条断言必然失败。不是"读了代码觉得对"，是同一把尺子量两次。
+     *
+     * 写入次数单独用 `StateStore.update` 计数（它是原型方法，实例上覆盖即可）——
+     * "写了没有"与"写了几次"是两件事，后者正是 `applySettings` 里 `persist:false` 要守的。
+     */
+    const { readFileSync: readStateSync } = await import('node:fs')
+    const presetFile = join(dir, 'preset-persist.json')
+    const makePresetRuntime = () =>
+      new QqRuntime(ctx, {
+        home: dir,
+        stateFile: presetFile,
+        workspace: join(dir, 'ws-preset'),
+        credentials,
+      })
+    const readPresetOnDisk = () => JSON.parse(readStateSync(presetFile, 'utf8')).settings.permissionPreset
+
+    const presetRuntime = makePresetRuntime()
+    // 先在盘上放一个与将要设置的值**不同**的旧值：新旧相同的话断言没有鉴别力。
+    await presetRuntime.store.update((next) => {
+      next.settings = { permissionPreset: 'workspace-write' }
+    })
+    let presetWrites = 0
+    const realUpdate = presetRuntime.store.update.bind(presetRuntime.store)
+    presetRuntime.store.update = async (mutate) => {
+      presetWrites += 1
+      return await realUpdate(mutate)
+    }
+    check('前置：盘上是旧预设', readPresetOnDisk(), 'workspace-write')
+
+    // ① setter 默认落盘
+    presetWrites = 0
+    presetRuntime.setPermissionPreset('danger-full-access')
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    check('★ setPermissionPreset 之后状态存储被写过（恰好一次）', presetWrites, 1)
+    check('★ 写入的 settings.permissionPreset 就是新值', readPresetOnDisk(), 'danger-full-access')
+    const afterRestart = makePresetRuntime()
+    await afterRestart.hydrateSettings()
+    check('★ 重启后读回的是新预设（用户报的"回退"不再发生）', afterRestart.settingsSnapshot().permissionPreset, 'danger-full-access')
+
+    // ② persist:false 必须真的不写 —— 这是 ① 的反向对照
+    presetWrites = 0
+    presetRuntime.setPermissionPreset('workspace-write', { persist: false })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    check('★ persist:false 不写盘（0 次）', presetWrites, 0)
+    check('★ persist:false 不改盘上的值', readPresetOnDisk(), 'danger-full-access')
+    check('★ 内存里已经改了（证明"没写盘"不是因为压根没生效）', presetRuntime.settingsSnapshot().permissionPreset, 'workspace-write')
+    const afterNoPersist = makePresetRuntime()
+    await afterNoPersist.hydrateSettings()
+    check(
+      '★★ 反向对照：没有落盘时重启读到的是旧值（= 故障现象）',
+      afterNoPersist.settingsSnapshot().permissionPreset,
+      'danger-full-access',
+    )
+
+    // ③ applySettings 恰好写一次盘：零次意味着设置丢了，两次意味着同一次变更写了两遍
+    presetWrites = 0
+    presetRuntime.applySettings({ permissionPreset: 'auto' })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    check('★ applySettings 恰好写一次盘（不是 0 次也不是 2 次）', presetWrites, 1)
+    check('★ applySettings 落盘的值正确', readPresetOnDisk(), 'auto')
+    check('★ applySettings 之后 setter 的内存值也一致', presetRuntime.settingsSnapshot().permissionPreset, 'auto')
+
+    /*
+     * ---- 模型的读/列/写（假宿主服务；不打真实 DSH）----
+     *
+     * 这三条路各自对应宿主的一个接口，都在 `runtime.js` 的注释里写了出处。
+     * 这里用假服务钉住**接线**：provider 分组有没有被展平、当前模型优先读哪个来源、
+     * 切换时传下去的 provider+model 对不对。
+     *
+     * ⚠️ 它**不能**证明"切完模型真的换了模型"——那要真实 DSH，只能由用户实测。
+     * 这一节能证明的只有"调用形状与 DSH 暴露的接口一致"。
+     */
+    const modelSelects = []
+    const sessionsById = new Map()
+    const projections = new Map()
+    // 宿主服务在 Cordis 里两条路都通（`ctx.get('x')` 与 `ctx.x`），假上下文也照给，
+    // 否则测的就不是运行时真正会走的那条路。
+    const modelServices = {
+      sessions: { get: (id) => sessionsById.get(id) },
+      sessionProjections: {
+        stateOf: (session, key) => (key === 'modelSelection' ? projections.get(session) : undefined),
+      },
+      sessionController: {
+        modelCatalog: async () => ({
+          default: { provider: 'deepseek-account', model: 'deepseek-chat' },
+          routableProviders: ['deepseek-account'],
+          groups: [
+            {
+              id: 'deepseek-account',
+              name: 'DeepSeek',
+              models: [
+                { id: 'deepseek-chat', name: 'DeepSeek Chat' },
+                { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+                { id: 'deepseek-broken', name: 'DeepSeek Broken' },
+              ],
+            },
+          ],
+          failures: [{ id: 'dead-provider', name: 'Dead', message: '凭据没配好' }],
+        }),
+        selectModel: async (request) => {
+          modelSelects.push(request)
+          // 一个"接口在、实际不可用"的模型：失败**必须**被说出来（POSTMORTEM 006 的教训）。
+          if (request.model === 'deepseek-broken') {
+            throw new Error('Select an available model before sending a message.')
+          }
+          return { selected: { provider: request.provider, model: request.model } }
+        },
+      },
+    }
+    const modelCtx = { get: (name) => modelServices[name], ...modelServices }
+    const modelRuntime = new QqRuntime(modelCtx, {
+      home: dir,
+      stateFile: join(dir, 'model-state.json'),
+      workspace: join(dir, 'ws-model'),
+      credentials,
+    })
+
+    const catalogRows = await modelRuntime.listModels()
+    check(
+      '★ 宿主按 provider 分组的目录被展平成一行一个模型',
+      JSON.stringify(catalogRows.map((row) => `${row.provider}/${row.model}`)),
+      JSON.stringify(['deepseek-account/deepseek-chat', 'deepseek-account/deepseek-reasoner', 'deepseek-account/deepseek-broken']),
+    )
+    check('展平时保留了显示名与 provider 名', `${catalogRows[0].name}|${catalogRows[0].providerName}`, 'DeepSeek Chat|DeepSeek')
+
+    // 当前模型有两个来源：会话投影优先，请求头兜底
+    const headerOnly = { requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-chat' } }) }
+    sessionsById.set('session-header', headerOnly)
+    projections.set(headerOnly, { lastUsed: null, pending: null })
+    const pendingOnly = { requestHeader: () => ({ config: { provider: 'old-p', model: 'old-m' } }) }
+    sessionsById.set('session-pending', pendingOnly)
+    projections.set(pendingOnly, { lastUsed: null, pending: { provider: 'new-p', model: 'new-m', reasoningEffort: 'high' } })
+    sessionsById.set('session-bare', { requestHeader: () => undefined })
+
+    check(
+      '★ 投影为空时回落到会话请求头里的模型',
+      JSON.stringify(modelRuntime.currentModel('session-header')),
+      JSON.stringify({ provider: 'deepseek-account', model: 'deepseek-chat' }),
+    )
+    check(
+      '★ 待生效的选择优先于请求头（切完还没跑下一步时也能显示新模型）',
+      JSON.stringify(modelRuntime.currentModel('session-pending')),
+      JSON.stringify({ provider: 'new-p', model: 'new-m', reasoningEffort: 'high' }),
+    )
+    check('会话没有任何模型记录时 undefined（用部署默认）', modelRuntime.currentModel('session-bare'), undefined)
+    check('未知会话 undefined', modelRuntime.currentModel('session-unknown'), undefined)
+    check('空 sessionId 不查宿主', modelRuntime.currentModel(''), undefined)
+
+    const selected = await modelRuntime.selectModel('session-header', 'deepseek-account', 'deepseek-reasoner')
+    check(
+      '★ selectModel 传下去的是 sessionId + provider + model（宿主契约就是这样）',
+      JSON.stringify(modelSelects),
+      JSON.stringify([{ sessionId: 'session-header', provider: 'deepseek-account', model: 'deepseek-reasoner' }]),
+    )
+    check('selectModel 回的是宿主归一化后的选择', selected.model, 'deepseek-reasoner')
+
+    // ---- 工具侧：agent 用自然语言走的是同一个路由（一份实现、两个入口）----
+    await modelRuntime.store.update((next) => {
+      next.bindings['111:peer'] = {
+        conversationId: '111:peer',
+        accountId: '111',
+        peerId: 'peer',
+        sessionId: 'session-header',
+        title: 'QQ 会话',
+        createdAt: 1,
+        lastUsedAt: Date.now(),
+      }
+    })
+    modelSelects.length = 0
+    const toolList = await modelRuntime.controlSession('session-header', 'model', undefined)
+    check('★ 工具 model（无目标）不切换', modelSelects.length, 0)
+    check('★ 工具 model（无目标）成功', toolList.ok, true)
+    check('★ 工具 model 不返回会话表（免得 agent 拿到无关清单去复述）', JSON.stringify(toolList.sessions), JSON.stringify([]))
+    check('★ 工具 model 告诉 agent 不要重复清单', toolList.detail.includes('不要重复'), true)
+
+    const toolSwitch = await modelRuntime.controlSession('session-header', 'model', '2')
+    check(
+      '★ 工具 model <编号> 与 /model <编号> 打的是同一个目标',
+      JSON.stringify(modelSelects.at(-1)),
+      JSON.stringify({ sessionId: 'session-header', provider: 'deepseek-account', model: 'deepseek-reasoner' }),
+    )
+    check('工具 model 切换成功', toolSwitch.ok, true)
+    check('★ 工具 model 告诉 agent 不要重复切换结果', toolSwitch.detail.includes('不要重复'), true)
+
+    const toolModelMissing = await modelRuntime.controlSession('session-header', 'model', '不存在的模型')
+    check('★ 工具 model 找不到目标时 ok:false（agent 据此闭嘴）', toolModelMissing.ok, false)
+    check('★ 找不到时不切换', modelSelects.length, 1)
+
+    const toolModelRefused = await modelRuntime.controlSession('session-header', 'model', '3')
+    check('★ 宿主拒绝时工具也报 ok:false（失败不静默）', toolModelRefused.ok, false)
+    check('★ 失败原因被带回来', toolModelRefused.detail.includes('没有成功'), true)
+
+    const toolUnbound = await modelRuntime.controlSession('session-not-bound', 'model', undefined)
+    check('★ 未绑定对话的会话不能操作模型', toolUnbound.ok, false)
+
+    // 缺服务时的降级：列清单回落为空、切换抛出（好让路由回一句失败而不是静默）
+    const noModelCtx = { get: () => undefined }
+    const noModelRuntime = new QqRuntime(noModelCtx, {
+      home: dir,
+      stateFile: join(dir, 'model-bare.json'),
+      workspace: join(dir, 'ws-model-bare'),
+      credentials,
+    })
+    check('★ 没有模型目录接口时返回空清单而不是抛', JSON.stringify(await noModelRuntime.listModels()), JSON.stringify([]))
+    let selectThrew = false
+    try {
+      await noModelRuntime.selectModel('s', 'p', 'm')
+    } catch {
+      selectThrew = true
+    }
+    check('★ 没有切换接口时抛出（调用方据此回一句失败）', selectThrew, true)
 
     // 老状态文件（没有 settings 块）必须仍然可读，且回落默认值
     const legacyFile = join(dir, 'legacy.json')
