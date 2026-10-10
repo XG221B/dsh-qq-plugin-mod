@@ -1,0 +1,130 @@
+# What has to hold before a change is considered good.
+#
+# There is no build step here: the plugin is plain JavaScript, shipped as written. That removes
+# most of what a CI file normally does, and it leaves the two things that have actually broken
+# releases in this project:
+#
+#   1. A file that does not parse. `lib/runtime.js` is over 2000 lines and is edited by hand; a
+#      stray brace there is a syntax error at import time, which in DSH means the plugin does not
+#      activate. One `node --check` per file catches that in a second, and printing the filename
+#      matters — a single globbed call would stop at the first bad file without saying which one.
+#   2. A name that is used but never imported. That one is invisible to `node --check` (a free
+#      variable is perfectly legal syntax) and to the unit checks (the path that reaches it may
+#      need a real inbound message). It cost this project every attachment-bearing message once:
+#      `ReferenceError: WORKSPACE_DIR_NAME is not defined`, logged as a single line while the user
+#      saw three unrelated symptoms. `tools/check-unbound.mjs` exists for it, and
+#      `tools/check-unused-imports.mjs` for its mirror image — an import left behind after the code
+#      that used it was removed.
+#
+# Both checkers carry a reverse control: they must catch the failure they were written for, or they
+# declare themselves untrustworthy and exit non-zero. A checker that can only ever print "pass" is
+# worse than none, because it makes people believe something was verified. That control is why
+# these two are in CI and the third checker is not:
+#
+#   `tools/check-cross-plugin.mjs` needs a real DSH profile — the `dsh.profile.bundles` list and
+#   the plugins installed under that profile's `node_modules`. A CI runner has neither, so it stays
+#   a local check (see docs/RELEASING.md and the checkers' own usage notes).
+#
+# `smoke/` is out for the same reason: those scripts talk to Tencent's live service and need real
+# bot credentials, which do not belong in a public repository's CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # `cache: npm` keys on package-lock.json, which is committed here, so the dependency
+          # download is skipped on every run after the first.
+          cache: npm
+
+      - run: npm ci
+
+      - name: Syntax-check every source file
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          count=0
+          # One `node --check` per file, so a failure names the file it came from. `set -e` makes
+          # the first one stop the job, which is the point: the remaining files' output would only
+          # bury the real error.
+          for file in **/*.js **/*.mjs; do
+            case "$file" in
+              *node_modules*) continue ;;
+            esac
+            node --check "$file"
+            count=$((count + 1))
+          done
+          echo "parsed $count .js/.mjs files"
+
+      - name: Host-side checks
+        run: node scripts/verify.mjs
+
+      # The send path is the one piece of logic whose failure is silent: a message that never goes
+      # out looks exactly like a message that was never sent. It also carries the passive→proactive
+      # fallback and the rate limiter, so a regression there is invisible until someone notices they
+      # are not being answered.
+      #
+      # `verify.mjs` cannot cover it — it needs a bot. This test substitutes one through a module
+      # resolution hook (`node:module`), so the real `#send` runs against a fake transport with no
+      # network and no writes to `node_modules`. The `/protocol` subpath is deliberately not faked,
+      # so `ReplyLimiter` and `chunkText` are the real implementations.
+      - name: Send-path checks (fake transport, real plugin)
+        run: node scripts/verify-send-path.mjs
+
+      # The client plugin registers UI into a scope every other plugin shares. These checks assert
+      # the registration shape (slot id, disposer, stylesheet removal) — they are not a visual
+      # check, and nothing here renders a page.
+      - name: Client-side checks
+        run: node scripts/verify-client.mjs
+
+      - name: No name is used without being imported
+        run: node tools/check-unbound.mjs .
+
+      - name: No import is left unused
+        run: node tools/check-unused-imports.mjs .
+
+      # What `npm publish` would actually upload, checked here rather than discovered by users.
+      #
+      # dsh-wechat shipped a release with no entry point to load, because `.gitignore` excluded the
+      # build output and npm's pack step consults `.gitignore` when a package has no `.npmignore`
+      # entry of its own. This package keeps `lib/` out of `.gitignore` for that reason, and this
+      # step is what proves the rule still holds — it names files rather than trusting the listing.
+      - name: The tarball carries what users need
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=$(npm pack --dry-run 2>&1)
+          missing=0
+          for required in \
+            lib/runtime.js lib/router.js index.js client.js cordis.patch.yml \
+            README.md README.zh.md LICENSE \
+            docs/POSTMORTEM.md docs/RELEASING.md \
+            tools/check-unbound.mjs tools/check-unused-imports.mjs
+          do
+            if ! grep -qF "$required" <<<"$manifest"; then
+              echo "missing from the tarball: $required"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "--- npm pack --dry-run said ---"
+            echo "$manifest"
+            exit 1
+          fi
+          echo "tarball carries the entry points, the docs and the checkers"
