@@ -1,6 +1,6 @@
 # dsh-qq-plugin
 
-[![CI](https://github.com/xcisxc29/dsh-qq/actions/workflows/ci.yml/badge.svg)](https://github.com/xcisxc29/dsh-qq/actions/workflows/ci.yml)
+[![CI](https://github.com/xcisxc29/dsh-qq-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/xcisxc29/dsh-qq-plugin/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-qq-plugin.svg)](https://www.npmjs.com/package/dsh-qq-plugin)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
@@ -46,8 +46,8 @@
 
 > ### 要装的这个名字是 `dsh-qq-plugin`
 >
-> 仓库叫 `dsh-qq`，包不叫：**把 `dsh-qq-plugin` 复制过去，别手打，注意 `-plugin`。**
-> 安装命令必须与包名逐字一致。
+> 仓库与包**同名**，没有需要对上的东西——但 `-plugin` 这个后缀很容易漏掉。
+> **把 `dsh-qq-plugin` 复制过去，别手打。** 安装命令必须与包名逐字一致。
 
 <details open>
 <summary><b>从 npm 装</b> —— 不用配置任何东西</summary>

@@ -1,6 +1,6 @@
 # dsh-qq-plugin
 
-[![CI](https://github.com/xcisxc29/dsh-qq/actions/workflows/ci.yml/badge.svg)](https://github.com/xcisxc29/dsh-qq/actions/workflows/ci.yml)
+[![CI](https://github.com/xcisxc29/dsh-qq-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/xcisxc29/dsh-qq-plugin/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-qq-plugin.svg)](https://www.npmjs.com/package/dsh-qq-plugin)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
@@ -49,8 +49,9 @@ package name, a Git URL, a tarball, or a local path.
 
 > ### The name to install is `dsh-qq-plugin`
 >
-> The repository is called `dsh-qq`, but the package is not: **copy `dsh-qq-plugin` rather than
-> typing it, and mind the `-plugin`.** The install command has to match the package name exactly.
+> The repository and the package share one name, so there is nothing to reconcile — but the
+> `-plugin` suffix is easy to drop by accident. **Copy `dsh-qq-plugin` rather than typing it.** The
+> install command has to match the package name exactly.
 
 <details open>
 <summary><b>From npm</b> — nothing to configure</summary>

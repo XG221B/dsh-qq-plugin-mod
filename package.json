@@ -14,13 +14,13 @@
     "plugin",
     "remote-control"
   ],
-  "homepage": "https://github.com/xcisxc29/dsh-qq#readme",
+  "homepage": "https://github.com/xcisxc29/dsh-qq-plugin#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xcisxc29/dsh-qq.git"
+    "url": "git+https://github.com/xcisxc29/dsh-qq-plugin.git"
   },
   "bugs": {
-    "url": "https://github.com/xcisxc29/dsh-qq/issues"
+    "url": "https://github.com/xcisxc29/dsh-qq-plugin/issues"
   },
   "main": "index.js",
   "exports": {

@@ -60,7 +60,7 @@ npm 拿它跟包上配置的 **Trusted Publisher** 核对。
 | 字段 | 值 |
 |---|---|
 | Organization or user | `xcisxc29` |
-| Repository | `dsh-qq` |
+| Repository | `dsh-qq-plugin` |
 | Workflow filename | **`publish.yml`** ← 是文件名，不是路径 |
 | Environment | **留空**（本工作流没有 environment） |
 
@@ -78,7 +78,7 @@ npm 在 2025-12 吊销了**全部经典 token**；替代它们的 granular token
 |---|---|---|
 | 仓库为 public | 仓库 Settings | `--provenance` 需要公开仓库才能生成可信签名 |
 | `id-token: write` | 已在工作流里 | OIDC 握手用；删了它发布必然失败，而且**没有别的凭据可以退回去** |
-| 仓库名是 `dsh-qq` | 仓库 Settings | Trusted Publisher 的 Repository 字段和它逐字一致 |
+| 仓库名是 `dsh-qq-plugin` | 仓库 Settings | Trusted Publisher 的 Repository 字段和它逐字一致 |
 
 **先干跑一次**：Actions → Publish → Run workflow，`dry-run` 默认 true，会把所有校验跑一遍但不发布。
 
