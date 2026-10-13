@@ -50,13 +50,18 @@ const PREFIX = '/.dsh-qq-plugin'
 /**
  * Where the user documentation lives, for the link in the settings page.
  *
- * The official QQ bot documentation site. A rendered page rather than a raw file: it is long and
- * full of tables, and this is the reading-friendly form. Opened as an ordinary `target="_blank"`
- * anchor, which the desktop shell intercepts and hands to the system browser — the same way its own
- * links work. A `window.open` or a scripted navigation would be denied by that same handler, so the
- * anchor is not a style choice, it is the mechanism.
+ * The handbook for this plugin, written for someone who is not going to read the source: what it is
+ * for, how to bind, what it accepts, and what every setting does. A rendered page rather than the
+ * raw file in the repository, because it is long and full of tables and that is the reading-friendly
+ * form. Opened as an ordinary `target="_blank"` anchor, which the desktop shell intercepts and hands
+ * to the system browser — the same way its own links work. A `window.open` or a scripted navigation
+ * would be denied by that same handler, so the anchor is not a style choice, it is the mechanism.
+ *
+ * The official QQ bot documentation (`https://bot.q.qq.com/wiki/`) used to be this link. It is the
+ * wrong destination: it explains the platform, not this plugin, and someone sent there to find out
+ * which switch stops the agent asking before every command finds nothing about it.
  */
-const HANDBOOK_URL = 'https://bot.q.qq.com/wiki/'
+const HANDBOOK_URL = 'https://github.com/xcisxc29/dsh-qq-plugin/blob/main/docs/HANDBOOK-USER.md'
 
 /**
  * The settings fields this page owns.
@@ -345,16 +350,16 @@ window.__ModuleLoader__.load({
           '只影响之后新建或采纳的会话；DSH 在会话第一个回合开始后就锁定预设。默认「完全访问」，DSH 执行命令时不再问你——问的话消息会发到 QQ，而任务会一直等着你回答。想验证权限提示能不能回流到手机，把这里切成能弹提示的那个预设。',
         permissionFull: '完全访问：不询问，直接执行',
         permissionAuto: '自动审核：电脑上判断',
-        permissionProfile: '跟随 profile 设置',
+        permissionProfile: '跟随 DSH 设置：和桌面端一样',
         permissionUnavailable: '此组合没有可选的权限预设。',
         permissionSwitching: '切换中…',
         groupBehaviour: '行为',
         groupBehaviourHint: '通道收到消息后怎么处理。',
         groupDiagnostics: '诊断',
         groupHelp: '帮助',
-        helpTitle: 'QQ 机器人文档',
-        helpHint: '绑定、权限、能发什么——官方文档里都有。',
-        helpOpen: '打开官方文档',
+        helpTitle: '使用手册',
+        helpHint: '出门在外怎么用、能发什么、每一项设置是什么意思——都在这里。',
+        helpOpen: '打开使用手册',
         groupCommands: '指令',
         commandsSlash: '斜杠指令',
         commandsSlashHint: '在 QQ 里直接发送。不经过 agent，也不问确认，最快。',
@@ -453,16 +458,16 @@ window.__ModuleLoader__.load({
           'Applies only to conversations created or adopted afterwards — DSH locks a preset once a conversation has run its first turn. The default is full access, so DSH does not ask before running a command: the prompt would arrive in QQ and the task would wait for your answer. Pick the asking preset here to verify that prompts can reach the phone.',
         permissionFull: 'Full access: run without asking',
         permissionAuto: 'Automatic review: decided on this computer',
-        permissionProfile: 'Follow the profile setting',
+        permissionProfile: 'Follow the DSH setting, same as the desktop',
         permissionUnavailable: 'This composition offers no permission presets.',
         permissionSwitching: 'Switching…',
         groupBehaviour: 'Behaviour',
         groupBehaviourHint: 'How incoming messages are handled.',
         groupDiagnostics: 'Diagnostics',
         groupHelp: 'Help',
-        helpTitle: 'QQ bot documentation',
-        helpHint: 'Binding, permissions, what can be sent — the official documentation has it.',
-        helpOpen: 'Open the documentation',
+        helpTitle: 'User handbook',
+        helpHint: 'How to use it away from the desk, what it accepts, and what every setting does.',
+        helpOpen: 'Open the handbook',
         groupCommands: 'Commands',
         commandsSlash: 'Slash commands',
         commandsSlashHint:
@@ -1169,7 +1174,36 @@ a.dsh-qq-button { text-decoration: none; }
         const available = asArray(presets?.available).filter((name) => typeof name === 'string')
         const sentinel = asString(presets?.sentinel, 'default') || 'default'
         const applied = asString(presets?.applied, sentinel) || sentinel
-        const presetOptions = [...available, sentinel]
+        /*
+         * The dropdown is built from the names this page can label in Chinese, **filtered by what
+         * this deployment actually offers**, and never from the raw catalogue.
+         *
+         * Why not render `available` as-is: those are the host's own identifiers
+         * (`danger-full-access`, `auto`, …), and a settings page whose options read as identifiers
+         * is a page the user has to translate before they can use it. The three names below are the
+         * ones with a sentence written for them, and they lead, in this order.
+         *
+         * Why not hardcode all three the way `dsh-wechat-plugin` does: its page pushes the value it
+         * shows, and `POST /permission-preset` answers 400 for any value outside `available`
+         * (`lib/routes.js`). A hardcoded `auto` on a deployment with no Auto integration would then
+         * be an option that can only fail — the user picks it and reads "未知预设". So a name is
+         * offered only when the host listed it.
+         *
+         * `sentinel` is the exception, and it is not a preset name: `'default'` means "apply nothing,
+         * keep the profile's own policy", and the route accepts it unconditionally. It is always
+         * offered, always third — that is the position it has on the WeChat page, where it is
+         * labelled the same way.
+         *
+         * Anything else the deployment offers (a house preset name) is appended **after** those
+         * three, under its own name. Dropping them would take a choice away from a deployment that
+         * has one, and this page has no Chinese sentence to offer for a name it has never seen —
+         * showing the name itself is the honest option there.
+         */
+        const labelledPresets = ['danger-full-access', 'auto'].filter((name) => available.includes(name))
+        const extraPresets = available.filter(
+          (name) => name !== sentinel && !labelledPresets.includes(name),
+        )
+        const presetOptions = [...labelledPresets, sentinel, ...extraPresets]
         const currentPreset = presetOptions.includes(applied) ? applied : sentinel
         const draft = isRecord(state.draft) ? state.draft : undefined
 
@@ -1224,7 +1258,14 @@ a.dsh-qq-button { text-decoration: none; }
           )
         }
 
-        /** A label for a preset name: the two reserved ones read as sentences, the rest as-is. */
+        /**
+         * A label for a preset name.
+         *
+         * The three this page has a sentence for read as sentences — the same three sentences the
+         * WeChat settings page uses, word for word. Any other name a deployment offers is shown
+         * as-is: inventing a Chinese gloss for a preset this file knows nothing about would be a
+         * label that does not describe the thing it names.
+         */
         function presetLabel(name) {
           if (name === sentinel) return t.permissionProfile
           if (name === 'danger-full-access') return t.permissionFull
@@ -1455,9 +1496,11 @@ a.dsh-qq-button { text-decoration: none; }
            * and, just as importantly, where the asking preset is turned back on to check that a
            * prompt really does reach the phone.
            *
-           * The catalogue is asked for rather than hardcoded, because the preset names come from the
-           * deployment's configuration. `sentinel` is not a preset name: it means "apply nothing and
-           * keep the profile's own policy", which is why it is rendered as its own option.
+           * The catalogue is still asked for rather than assumed — the option list above is built
+           * from `available` and only *labelled* here — because the preset names come from the
+           * deployment's configuration and a value this deployment does not list would be refused
+           * by the route that applies it. `sentinel` is not a preset name: it means "apply nothing
+           * and keep the profile's own policy", which is why it is rendered as its own option.
            */
           h(
             Group,
@@ -1469,7 +1512,19 @@ a.dsh-qq-button { text-decoration: none; }
               h('span', { className: 'dsh-qq-hint' }, t.permissionPresetHint),
               field(
                 t.permissionPreset,
-                presetOptions.length <= 1 ? t.permissionUnavailable : asString(presets?.note),
+                /*
+                 * The host's own note when it has one, this page's sentence otherwise.
+                 *
+                 * Every note the host produces belongs to the *empty* case — "此组合没有权限预设服务",
+                 * "服务报出的可选预设为空", or the error from reading `names` — so an either/or that
+                 * preferred this page's generic sentence down here would hide the only specific
+                 * reason that exists. That is what it did: with `available` empty the branch always
+                 * took `permissionUnavailable`, and the host's note was unreachable in practice.
+                 *
+                 * `permissionUnavailable` stays as the fallback, for a host that reports no note.
+                 */
+                asString(presets?.note) ||
+                  (presetOptions.length <= 1 ? t.permissionUnavailable : ''),
                 h(
                   'select',
                   {

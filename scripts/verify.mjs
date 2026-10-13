@@ -3450,5 +3450,67 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   }
 }
 
+// ---- 用户手册不会漂移：设置名与指令名都以代码为准 --------------------------
+//
+// 一份写给用户的手册，最坏的失败不是写得难看，而是**教了一个不存在的操作**：用户照着做，
+// 做不到，而且不知道该信谁。所以这里把手册与代码对齐，**两个方向都查**。
+//
+// 1. **每一项设置都要被写到。** `lib/settings.js` 的 `SETTINGS_SCHEMA` 是设置名的唯一来源；
+//    在那里加一项而忘了写进手册，这条就红。（反过来说，手册里的设置名用反引号写，
+//    正是这条检查认的形式。）
+// 2. **指令名双向一致。** 手册里出现的指令必须是 `router.js` 真的认的那几条之一——否则手册
+//    在教一个不存在的操作；而 `router.js` 认的每一条也必须在手册里出现过——否则加了指令不说。
+//
+// 提取规则是有意的：只认"行首、空白、反引号、左括号、顿号、逗号之后"的 `/小写字母`。
+// 于是 URL 里那些 `q.qq.com/qqbot/...`、`https://github.com/...` 不会被误当成指令
+// （它们的 `/` 前面是字母或另一个 `/`），而 `/switch3`、`/switch:3` 都会归到 `switch`。
+{
+  const { readFileSync } = await import('node:fs')
+  const { dirname, join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  let handbook
+  try {
+    handbook = readFileSync(join(root, 'docs', 'HANDBOOK-USER.md'), 'utf8')
+  } catch {
+    handbook = undefined
+  }
+  check('★ 用户手册存在且不为空', typeof handbook === 'string' && handbook.length > 1000, true)
+  if (handbook === undefined) {
+    show('手册路径', join(root, 'docs', 'HANDBOOK-USER.md'))
+  } else {
+    const { SETTINGS_KEYS } = await import('../lib/settings.js')
+    const undocumentedSettings = SETTINGS_KEYS.filter((key) => !handbook.includes(`\`${key}\``))
+    check(
+      '★ 手册写到了每一项设置（SETTINGS_SCHEMA 是唯一来源）',
+      undocumentedSettings.length === 0,
+      true,
+    )
+    if (undocumentedSettings.length > 0) show('手册里没有的设置名', undocumentedSettings.join(' '))
+
+    const routerSource = readFileSync(join(root, 'lib', 'router.js'), 'utf8')
+    const accepted = new Set()
+    for (const block of routerSource.matchAll(
+      /const COMMANDS_(?:BARE|WITH_ARG|OPTIONAL_ARG) = \[([^\]]*)\]/g,
+    )) {
+      for (const quoted of block[1].matchAll(/'(\/[a-z]+)'/g)) accepted.add(quoted[1].slice(1))
+    }
+    check('前置：从 router.js 读到了指令表', accepted.size >= 5, true)
+    show('代码认的指令', [...accepted].sort().join(' '))
+
+    const mentioned = new Set()
+    for (const match of handbook.matchAll(/(^|[\s`(（、,，])\/([a-z]+)/gm)) mentioned.add(match[2])
+    show('手册里提到的指令', [...mentioned].sort().join(' '))
+
+    const phantom = [...mentioned].filter((word) => !accepted.has(word))
+    check('★ 手册里的指令都在代码里（不教不存在的操作）', phantom.length === 0, true)
+    if (phantom.length > 0) show('手册里有、代码里没有的指令', phantom.join(' '))
+
+    const unmentioned = [...accepted].filter((word) => !mentioned.has(word))
+    check('★ 代码里的指令都写进了手册（加了指令不说，这里就红）', unmentioned.length === 0, true)
+    if (unmentioned.length > 0) show('代码里有、手册里没有的指令', unmentioned.join(' '))
+  }
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`)
 process.exit(failures === 0 ? 0 : 1)

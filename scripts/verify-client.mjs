@@ -89,6 +89,46 @@ check(
     !code.includes('body: JSON.stringify(state.draft)'),
 )
 
+/*
+ * The help link.
+ *
+ * It used to point at `https://bot.q.qq.com/wiki/`, which is the platform's documentation: a user
+ * who follows it to find out which switch stops the agent asking before every command finds nothing
+ * about this plugin. The link is the one piece of user documentation the page offers, so where it
+ * goes is a fact worth pinning — and the two halves are a pair: the value names the handbook, and
+ * the handbook has to be a file that exists in this repository.
+ *
+ * Read through `code` (comments stripped): the file header explains the change and quotes the old
+ * address, and a substring check over the raw source would trip on that explanation.
+ */
+const handbookUrl = /const HANDBOOK_URL = '([^']*)'/.exec(code)?.[1]
+equal(
+  '★ the help link is the user handbook',
+  handbookUrl,
+  'https://github.com/xcisxc29/dsh-qq-plugin/blob/main/docs/HANDBOOK-USER.md',
+)
+check(
+  '★ reverse control: the help link is no longer the official QQ bot wiki',
+  handbookUrl !== 'https://bot.q.qq.com/wiki/',
+  String(handbookUrl),
+)
+{
+  // The repository path in the URL has to be the path on disk, or the link 404s for every user.
+  const linked = /dsh-qq-plugin\/blob\/main\/(.+)$/.exec(handbookUrl ?? '')?.[1]
+  check('the link names a path inside the repository', typeof linked === 'string', String(linked))
+  let handbook
+  try {
+    handbook = readFileSync(join(here, '..', linked ?? ''), 'utf8')
+  } catch {
+    handbook = undefined
+  }
+  check(
+    '★ the linked handbook file exists in this repository',
+    typeof handbook === 'string' && handbook.length > 1000,
+    handbook === undefined ? 'not found' : `${handbook.length} bytes`,
+  )
+}
+
 console.log('\n-- 2. Registration under a stubbed browser baseline --')
 
 /** The registration spec the module hands to the shell. */
@@ -694,6 +734,21 @@ const hostSettings = {
 let postAnswer = { ...hostSettings }
 /** The last request body the page posted, so the assertions can name what it actually sent. */
 let postedPatch
+/**
+ * What `GET /permission-presets` answers with, and the last body posted to `/permission-preset`.
+ *
+ * A variable rather than a constant because the catalogue is the deployment's, not the page's: the
+ * assertions in section 8e drive three different hosts through it — the ordinary one (both labelled
+ * presets), one with no preset service at all (`available: []`, which is what a composition without
+ * `@deepseek-ai/dsh-permission-presets` reports), and one with a house preset name this page has no
+ * sentence for.
+ *
+ * `postedPreset` exists for the assertion that the page sends the **value** of the option the user
+ * picked and not its label: with a `<select>` those two are different strings, and a page that
+ * posted the label would look right on screen and fail at the host.
+ */
+let presetAnswer = { applied: 'default', sentinel: 'default', available: [], note: '' }
+let postedPreset
 const fetched = []
 const cannedFetch = async (path, options) => {
   const url = String(path)
@@ -712,7 +767,11 @@ const cannedFetch = async (path, options) => {
       body = { settings: { ...hostSettings }, defaults: hostSettings }
     }
   } else if (url.endsWith('/permission-presets')) {
-    body = { applied: 'default', sentinel: 'default', available: [], note: '' }
+    body = { ...presetAnswer }
+  } else if (url.endsWith('/permission-preset')) {
+    // The host the real route imitates: it echoes back the state the switch produced (`lib/routes.js`).
+    postedPreset = JSON.parse(options.body)
+    body = { ok: true, ...presetAnswer, applied: postedPreset.preset }
   } else if (url.endsWith('/log')) {
     body = { path: 'boot.log', tail: '' }
   } else if (url.endsWith('/accounts')) {
@@ -898,6 +957,132 @@ const isButtonLabelled = (label) => (node) => node.type === 'button' && node.pro
   } finally {
     console.error = realError
   }
+}
+
+// ---- 8e. The permission dropdown: Chinese sentences, and never a value the host would refuse ----
+//
+// The page used to render the host's own catalogue verbatim, so its options read as
+// `danger-full-access` / `auto` / … . The three names below now lead with a sentence written for
+// them — the same three sentences the WeChat settings page uses, word for word — while the
+// catalogue still decides **which** of them can be offered: `POST /permission-preset` answers 400
+// for any value that is not in `available` (except the sentinel), so an option the deployment does
+// not list is an option that can only fail.
+//
+// Every claim here has its reverse control: the ordinary deployment gets all three in order, a
+// deployment with a house preset keeps it, and a deployment with no preset service gets no option
+// that would 400.
+{
+  /** Every `<option>` in the tree, in render order. */
+  const optionsOf = (form) => {
+    const options = []
+    walkTree(form.draw(), (node) => {
+      if (node.type === 'option') options.push(node)
+    })
+    return options
+  }
+  /** The preset `<select>` itself. */
+  const selectOf = (form) => form.find((node) => node.type === 'select')
+  /** Mount and wait for the loaded page. */
+  const loadedForm = async () => {
+    const form = await mountForm()
+    await waitFor(() => form.texts().includes('行为设置'))
+    return form
+  }
+
+  // The ordinary deployment: the two presets this page has sentences for.
+  presetAnswer = {
+    applied: 'default',
+    sentinel: 'default',
+    available: ['danger-full-access', 'auto'],
+    note: '',
+  }
+  const form = await loadedForm()
+  const options = optionsOf(form)
+  equal(
+    '★ 三个预设选项的 value 与顺序（与微信设置页同一个）',
+    options.map((option) => option.props.value),
+    ['danger-full-access', 'auto', 'default'],
+  )
+  equal(
+    '★ 三条中文文案逐字一致',
+    options.map((option) => option.props.children),
+    ['完全访问：不询问，直接执行', '自动审核：电脑上判断', '跟随 DSH 设置：和桌面端一样'],
+  )
+  check(
+    '★ 每个可选项都在 available 或 sentinel 里（否则选中就是一个 400）',
+    options.every(
+      (option) =>
+        presetAnswer.available.includes(option.props.value) || option.props.value === 'default',
+    ),
+    options.map((option) => option.props.value).join(','),
+  )
+
+  /*
+   * The assertion the whole Chinese-label change could silently break: the label is what the user
+   * reads, and the `value` is what the page posts. A `<select>` carries both, so a page that sent
+   * the label would look perfect and be wrong.
+   */
+  selectOf(form)?.props.onChange({ target: { value: 'auto' } })
+  const posted = await waitFor(() => postedPreset !== undefined)
+  check('前置：切换预设的请求发出去了', posted, true)
+  equal('★ 选中「自动审核：电脑上判断」时，发给主机的是它的 value', postedPreset?.preset, 'auto')
+
+  // Reverse control: a composition with no preset service at all — `available` is empty.
+  presetAnswer = {
+    applied: 'default',
+    sentinel: 'default',
+    available: [],
+    note: '此组合没有权限预设服务',
+  }
+  const bare = await loadedForm()
+  equal(
+    '★ available 为空时不给任何会被 400 的选项（只剩哨兵）',
+    optionsOf(bare).map((option) => option.props.value),
+    ['default'],
+  )
+  equal('★ 那种情况下下拉是禁用的', selectOf(bare)?.props.disabled, true)
+  equal(
+    '★ 并保住主机报的那句说明（它是"这台机器没有可选项"的唯一来源）',
+    bare.texts().includes('此组合没有权限预设服务'),
+    true,
+  )
+  /*
+   * Reverse control for that: the host's notes all belong to the empty case, so if the page did not
+   * fall back there, a host that reports no note would leave the user looking at a disabled box
+   * with nothing said about it.
+   */
+  presetAnswer = { applied: 'default', sentinel: 'default', available: [], note: '' }
+  const bareNoNote = await loadedForm()
+  equal(
+    '★ 主机没给说明时，页面自己那句还在（否则只剩一个灰框）',
+    bareNoNote.texts().includes('此组合没有可选的权限预设。'),
+    true,
+  )
+
+  // Reverse control: a deployment with a house preset keeps it, under its own name.
+  presetAnswer = { applied: 'house-strict', sentinel: 'default', available: ['house-strict'], note: '' }
+  const house = await loadedForm()
+  equal(
+    '★ 部署方自定义的预设不会被删掉（原名出现，排在哨兵之后）',
+    optionsOf(house).map((option) => option.props.value),
+    ['default', 'house-strict'],
+  )
+  equal('★ 且页面仍然选中当前生效的那个', selectOf(house)?.props.value, 'house-strict')
+
+  // And when both are on offer, the three the page can label keep the leading positions.
+  presetAnswer = {
+    applied: 'danger-full-access',
+    sentinel: 'default',
+    available: ['danger-full-access', 'auto', 'house-strict'],
+    note: '',
+  }
+  const mixed = await loadedForm()
+  equal(
+    '★ 认得的三个在前，认不得的排在其后',
+    optionsOf(mixed).map((option) => option.props.value),
+    ['danger-full-access', 'auto', 'default', 'house-strict'],
+  )
+  equal('★ 认不得的那个仍然显示原名', optionsOf(mixed)[3]?.props.children, 'house-strict')
 }
 
 // Restore everything this section stubbed, so a failure cannot leave the harness stubbed.
