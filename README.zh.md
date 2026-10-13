@@ -56,7 +56,7 @@
 dsh-qq-plugin
 ```
 
-需要指定版本就写 `dsh-qq-plugin@1.0.0`。
+需要指定版本就写 `dsh-qq-plugin@1.0.1`。
 </details>
 
 <details>
@@ -74,7 +74,7 @@ C:\path\to\dsh-qq
 
 ```bash
 npm pack
-# → dsh-qq-plugin-1.0.0.tgz
+# → dsh-qq-plugin-1.0.1.tgz
 ```
 
 把那个 `.tgz` 的绝对路径粘进 **添加插件**。
