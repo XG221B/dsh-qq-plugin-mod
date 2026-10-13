@@ -289,6 +289,8 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
       },
     }
     const gateway = {
+      // 创建与采纳是两条路（只有创建带标题）；这一节不测标题，所以两个都收下即可。
+      createSession: async () => {},
       ensureSession: async () => {},
       prompt: async () => {},
       cancel: async () => {},
@@ -427,6 +429,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     const beforeRestart = await send(h5, '查看其余')
     const restarted = new r.SessionRouter({
       gateway: {
+        createSession: async () => {},
         ensureSession: async () => {},
         prompt: async () => {},
         cancel: async () => {},
@@ -449,6 +452,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     await send(h6, '查看其余')
     const restarted2 = new r.SessionRouter({
       gateway: {
+        createSession: async () => {},
         ensureSession: async () => {},
         prompt: async () => {},
         cancel: async () => {},
@@ -702,6 +706,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     return {
       router: new r.SessionRouter({
         gateway: {
+          createSession: async () => {},
           ensureSession: async () => {},
           prompt: async () => {},
           listSessions: async () => [],
@@ -844,7 +849,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   // 没有对话时不能凭空调等级（等级的归属也是会话）
   // 没有对话时不能凭空调模型（模型的归属是会话）
   const noBinding = new r.SessionRouter({
-    gateway: { ensureSession: async () => {}, prompt: async () => {}, listSessions: async () => [], listOwnSessions: async () => [], cancel: async () => {}, listModels: async () => models },
+    gateway: { createSession: async () => {}, ensureSession: async () => {}, prompt: async () => {}, listSessions: async () => [], listOwnSessions: async () => [], cancel: async () => {}, listModels: async () => models },
     store: { load: async () => ({}), save: async () => {} },
     titlePrefix: 'QQ',
   })
@@ -1089,6 +1094,167 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   // 没有引用时两者完全一致（旧行为一个字不变）
   const plain = p.splitRouteText({ content: '你好' })
   check('没有引用时拆与不拆同形', JSON.stringify([plain.text, plain.composed, 'quoted' in plain]), JSON.stringify(['你好', '你好', false]))
+}
+
+// ---- 会话命名：首条消息只提交一条，标题由创建时显式给出 --------------------
+/*
+ * 用户报的 bug：新建或切换会话之后的**第一条**消息，agent 收到的是两条先后独立的
+ * 用户消息——先「你好」，再整段 `presenceNote`。
+ *
+ * 成因是"命名那条"（会话的第一条）被**故意**拆成两条提交，为的是不让渠道说明
+ * 混进 DSH 从首条消息猜出来的会话标题。所以修复要两件事一起做，这里也两件一起钉：
+ *
+ * 1. 那一条**只提交一次**，且用户的话与说明在同一条里（用户的话在前）；
+ * 2. 标题改为**创建会话时显式交给宿主**，由用户自己的话推导、**不含渠道说明**。
+ *
+ * ⚠️ 这一节证明的是"提交几次、文本长什么样、给宿主的是什么标题"。
+ * 它**不能**证明桌面端把标题显示成什么样——那要有真机与运行中的 DSH。
+ */
+{
+  const p = await import('../lib/prompt.js')
+  const r = await import('../lib/router.js')
+  const { SETTINGS_DEFAULTS } = await import('../lib/settings.js')
+
+  /** 真实的渠道说明（默认值），不是编的——污染与否取决于它真实的样子。 */
+  const NOTE = SETTINGS_DEFAULTS.presenceNote.trim()
+  const ATTACH = '[图片] C:\\me\\qq\\a.png (2.0 KB)'
+
+  // ---- 一、交付文本：一条，用户的话在前、说明在最后 ----
+  {
+    const parts = p.composeDelivery({ promptText: '你好', attachmentLines: [ATTACH], note: NOTE })
+    check('★ 会话第一条只提交一次（不是两条）', parts.length, 1)
+    check(
+      '★ 那一条里同时有用户的话与渠道说明',
+      JSON.stringify([parts[0].includes('你好'), parts[0].includes(NOTE)]),
+      JSON.stringify([true, true]),
+    )
+    check('★ 用户的话在最前、渠道说明在最尾', JSON.stringify([parts[0].indexOf('你好') === 0, parts[0].endsWith(NOTE)]), JSON.stringify([true, true]))
+    check('★ 附件描述排在两者之间', parts[0], `你好\n\n${ATTACH}\n\n${NOTE}`)
+    // 说明为空时不留空行（旧行为一个字不变）
+    check('说明为空串时不留下空段', p.composeDelivery({ promptText: '你好', note: '' })[0], '你好')
+    check('什么都没有时不出元素', p.composeDelivery({ promptText: '' }).length, 0)
+
+    /*
+     * 反向对照：**旧形状**是每条元素各自被提交一次，而命名那条有两个元素
+     * （`[用户的话, 渠道说明]`）。下面照旧形状摆一遍，证明"两条"与"一条"在
+     * 内容上就是两回事：旧形状的第一条里**没有**说明，说明是独立第二条。
+     * 所以任何让 `composeDelivery` 回到两个元素的改动，都会同时打掉上面两条断言。
+     */
+    const oldShape = ['你好', NOTE]
+    check('反向对照：旧形状的第一条里没有渠道说明', oldShape[0].includes(NOTE), false)
+    check('反向对照：旧形状的说明是独立第二条', oldShape.length === 1, false)
+  }
+
+  // ---- 二、标题推导：语义与宿主那条回退一致，且不含渠道说明 ----
+  {
+    check('★ 就是用户自己的话', r.deriveSessionTitle('你好'), '你好')
+    check('★ 空白折叠成一个空格并 trim', r.deriveSessionTitle('  你好\n\n  世界 \t 嗯 '), '你好 世界 嗯')
+
+    // 词数上限 5（与宿主 `fallbackMaxWords` 同值）
+    const eightWords = 'a b c d e f g h'
+    check('★ 词数上限 5（出处 cordis.patch.yml:58）', r.deriveSessionTitle(eightWords), 'a b c d e')
+    check('反向对照：输入确实有 8 个词（否则上面那条没有鉴别力）', eightWords.split(' ').length, 8)
+
+    // 字节上限 40（与宿主 `fallbackMaxBytes` 同值）
+    const long = '一'.repeat(20)
+    check('★ 字节上限 40（出处 cordis.patch.yml:59）', Buffer.byteLength(r.deriveSessionTitle(long), 'utf8'), 39)
+    check('反向对照：输入确实是 60 字节（真的被截短了）', Buffer.byteLength(long, 'utf8'), 60)
+
+    // 按码点截断：逐 UTF-16 码元截会把 emoji 劈成两半
+    const emoji = '😀'.repeat(11)
+    const cut = r.deriveSessionTitle(emoji)
+    check('★ 截断不切开码点（11 个 emoji 截成 10 个 = 40 字节）', JSON.stringify([Buffer.byteLength(cut, 'utf8'), [...cut].length]), JSON.stringify([40, 10]))
+
+    // 没有可见字符 → 空串（调用方据此**不传**标题，见 `#bind`）
+    check('★ 全空白推不出标题', r.deriveSessionTitle('   \n\t '), '')
+    check('非字符串不抛', r.deriveSessionTitle(undefined), '')
+
+    /*
+     * ★ 标题不被污染，而且这条断言**有鉴别力**。
+     *
+     * 上面那条只是"没有看到渠道说明"，而这句话在标题恰好很短时也成立。
+     * 所以紧接着把同一段渠道说明**真的喂进去**：标题立刻被污染。
+     * 这两条一起才说明"不含渠道说明"是被检查到了，而不是恰好没撞上——
+     * 也说明 `#bind` 必须收到**用户自己的话**，而不是拼好的提示词。
+     */
+    const polluted = r.deriveSessionTitle(`你好\n\n${NOTE}`)
+    check('★ 由用户的话推出的标题不含渠道说明', r.deriveSessionTitle('你好').includes('渠道'), false)
+    check('反向对照：把渠道说明也当输入，标题立刻被污染', polluted.includes('渠道'), true)
+    check('反向对照：被污染的标题就是修复前会落到桌面上的那个', polluted.startsWith('你好'), true)
+  }
+
+  // ---- 三、路由：创建时给标题；已有会话不改名；`/new <标题>` 照旧 ----
+  {
+    const CONV = { conversationId: '111:peer', accountId: '111', peerId: 'peer' }
+    /** 创建时收到的标题（**只有创建这条路会走到它**）。 */
+    const created = []
+    /** 采纳时收到的参数（用来证明"采纳不带标题"）。 */
+    const ensured = []
+    const bindings = {}
+    const router = new r.SessionRouter({
+      gateway: {
+        createSession: async (sessionId, title) => {
+          created.push({ sessionId, title })
+        },
+        ensureSession: async (sessionId, title) => {
+          ensured.push({ sessionId, title })
+        },
+        prompt: async () => {},
+        cancel: async () => {},
+        listSessions: async () => [],
+        listOwnSessions: async () => [],
+        listModels: async () => [],
+        currentModel: async () => undefined,
+        selectModel: async () => {
+          throw new Error('这一节不测模型')
+        },
+      },
+      store: {
+        load: async () => bindings,
+        save: async () => {},
+      },
+      titlePrefix: 'QQ',
+      ownWorkspace: 'C:\\me\\dsh_qq',
+      ownWorkspaceLabel: 'QQ 会话',
+    })
+
+    const first = await router.route({ ...CONV, text: '你好' })
+    check('第一条普通消息创建了会话', first.kind, 'prompt')
+    check('★ 创建会话时传了标题（而不是 undefined）', typeof created[0]?.title === 'string' && created[0].title !== '', true)
+    check('★ 传的就是由用户的话推导出来的那个标题', created[0]?.title, r.deriveSessionTitle('你好'))
+    check('★ 标题里没有渠道说明', (created[0]?.title ?? '').includes('渠道'), false)
+    check('★ 创建只发生一次', created.length, 1)
+
+    /*
+     * ★ 已有会话的后续消息**不改名**。
+     *
+     * 直接判据是"给标题的那条路没有再被走到"，而不是"标题看起来没变"——
+     * 后者在标题恰好相同时也成立。上面那条 `created.length === 1` 就是它的对照：
+     * 计数器确实会动（创建那一步让它从 0 变成 1），所以"没动"是有意义的。
+     */
+    await router.route({ ...CONV, text: '第二条' })
+    await router.route({ ...CONV, text: '第三条' })
+    check('★ 后续消息不再给标题（已有会话不被改名）', created.length, 1)
+    check('★ 后续消息走的是"确保会话还活着"那条路', ensured.length, 2)
+    check('★ 那条路不带标题（采纳永不改名）', ensured[0]?.title, undefined)
+    check('反向对照：创建那一步确实让计数器动过', created.length >= 1, true)
+
+    // `/new <标题>`：显式标题照旧生效，且它就是交给宿主的会话标题
+    const made = await router.route({ ...CONV, text: '/new 写周报' })
+    check('★ /new <标题> 的显式标题照旧生效', created.at(-1)?.title, '写周报')
+    check('★ 绑定标签也是那个标题', (await router.current(CONV.conversationId))?.title, '写周报')
+    check('★ 确认文案印的也是它', made.text.includes('已新建对话「写周报」'), true)
+    check('★ 显式标题没有被"由原话推导"覆盖（原话是 /new 写周报）', created.at(-1)?.title === r.deriveSessionTitle('/new 写周报'), false)
+
+    // `/new` 不带参数：没有可命名的东西 → **不传空串**，让宿主自己从首条消息取
+    await router.route({ ...CONV, text: '/new' })
+    check('★ /new 不带参数时不传空标题（传 undefined）', created.at(-1)?.title, undefined)
+    check('★ 但绑定标签仍有兜底（前缀 + 短 id）', (await router.current(CONV.conversationId))?.title.startsWith('QQ '), true)
+
+    // 只有附件、没有文字：同样没有可命名的用户措辞
+    await router.route({ conversationId: '111:pic', accountId: '111', peerId: 'pic', text: '' })
+    check('★ 没有文字时也不传空标题（undefined，不是空串）', created.at(-1)?.title, undefined)
+  }
 }
 
 // ---- 设置页后端：快照、施加、以及工具重注册 --------------------------------
