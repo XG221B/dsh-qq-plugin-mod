@@ -3062,5 +3062,323 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   }
 }
 
+/*
+ * ---- ★ rename 的"文件被占用"重试（state.js）--------------------------------
+ *
+ * 为什么这一节必须存在：微信插件的同类代码在 Windows 上**实测 2000 次里失败 790 次**
+ * （"有进程正读着该文件时 rename 会 EPERM"），而它那条**至今没修**，缺的正是这一节——
+ * 它没有反向验证。
+ *
+ * ⚠️ 我们**没有真机**：无法验证"真机上 Windows 是否真的会 EPERM"。
+ * 所以这里测的**不是操作系统的行为**（本项目"别赌 errno"的纪律），而是**我们代码的契约**：
+ * 注入一个必然失败的 `rename`，断言重试发生了、上限之后失败看得见、不可重试的错误一次就放弃。
+ * 真机那一条只能由用户实测。
+ */
+{
+  const { mkdtempSync, rmSync, writeFileSync: writeReal, existsSync, readFileSync } = await import('node:fs')
+  const { renameSync: renameReal } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { StateStore, RETRYABLE_RENAME_CODES, WRITE_RETRY_BACKOFF_MS } = state
+
+  /** 一个"文件被占用"的错误：只带 `code`，不靠操作系统的 message 文案。 */
+  const occupied = (code) => {
+    const error = new Error(`${code}: operation not permitted, rename '<tmp>' -> '<state>'`)
+    error.code = code
+    return error
+  }
+  /** 本进程会用的临时文件名（`#write` 的约定）。 */
+  const tempPath = (file) => `${file}.${process.pid}.tmp`
+
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-qq-rename-'))
+  try {
+    // ---- 0. 契约：可重试的只有"文件被占用"那一类；退避有上限且不固定 ----
+    check('★ 可重试的错误码就是 Windows 的"文件被占用"那一类', JSON.stringify([...RETRYABLE_RENAME_CODES].sort()), JSON.stringify(['EACCES', 'EBUSY', 'EPERM']))
+    check('★ ENOSPC（磁盘满）不在可重试集合里', RETRYABLE_RENAME_CODES.has('ENOSPC'), false)
+    check('★ 退避总时长有上限（短、可控；这是同步路径）', WRITE_RETRY_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0) <= 200, true)
+    check('★ 退避是递增的（不是固定睡眠）', WRITE_RETRY_BACKOFF_MS.every((ms, at) => at === 0 || ms > WRITE_RETRY_BACKOFF_MS[at - 1]), true)
+    /*
+     * ★ 这一条是**突变实验的挡板**：把 `WRITE_RETRY_BACKOFF_MS` 改成 `[]`（等于不重试）
+     * 它必须变红。没有它，"把重试关掉"这件事可以由一个常量悄悄完成，而所有断言照样全绿
+     * ——微信那条没修的缺陷，本质就是"没有任何东西在盯着重试还在不在"。
+     */
+    check('★ 生产配置至少重试 3 次（关掉重试必须让测试变红）', WRITE_RETRY_BACKOFF_MS.length >= 3, true)
+
+    // ---- 1. 前两次 EPERM、第三次成功：重试确实发生，且写成不是错误 ----
+    {
+      const file = join(dir, 'a.json')
+      const errors = []
+      const retries = []
+      let calls = 0
+      const store = new StateStore(file, {
+        onError: (m) => errors.push(m),
+        onRetry: (m) => retries.push(m),
+        rename: (from, to) => {
+          calls += 1
+          if (calls <= 2) throw occupied('EPERM')
+          renameReal(from, to)
+        },
+      })
+      let thrown
+      try {
+        await store.update((next) => {
+          next.accounts['a'] = { appId: 'a', enabled: true }
+        })
+      } catch (error) {
+        thrown = error
+      }
+      check('★ 重试之后这次写盘是成功的（不该抛给调用方）', thrown === undefined, true)
+      check('★ 第一次 EPERM 之后确实又试了（rename 调用次数 > 1）', calls > 1, true)
+      check('★ 试到成功为止：失败 2 次 → 一共调用 3 次', calls, 3)
+      check('★ 靠重试写成的那一次留下了证据（否则没人知道真机上会不会遇到）', retries.length, 1)
+      check('★ 证据里点名了尝试次数与错误码', (retries[0] ?? '').includes('attempts=3') && (retries[0] ?? '').includes('EPERM'), true)
+      check('★ 重试成功**不算错误**（错误环里不该出现它——不喊狼来了）', errors.length, 0)
+      check('★ 状态真的落盘了（重试不是只在内存里成功）', Object.keys((await new StateStore(file).read()).accounts).join(','), 'a')
+      check('★ 写成之后没有留下 .tmp', existsSync(tempPath(file)), false)
+    }
+
+    // ---- 2. 一直 EPERM：重试到上限，失败必须可见，临时文件必须清掉 ----
+    {
+      const file = join(dir, 'b.json')
+      // 盘上先有一份**好的**状态：一次失败的写入绝不能把它弄坏。
+      writeReal(file, JSON.stringify({ version: 1, accounts: { keep: { appId: 'keep', enabled: true } }, autoStart: false }), 'utf8')
+      const errors = []
+      const retries = []
+      let calls = 0
+      const store = new StateStore(file, {
+        onError: (m) => errors.push(m),
+        onRetry: (m) => retries.push(m),
+        rename: () => {
+          calls += 1
+          throw occupied('EPERM')
+        },
+      })
+      let thrown
+      try {
+        await store.update((next) => {
+          delete next.accounts.keep
+        })
+      } catch (error) {
+        thrown = error
+      }
+      check('★ 一直失败时试到上限就不再试（次数 = 退避表长度 + 1）', calls, WRITE_RETRY_BACKOFF_MS.length + 1)
+      check('★ 超过上限后是**抛出**的（调用方能知道，不是静默丢状态）', thrown !== undefined, true)
+      check('★ 抛出的还是原来那个 errno（可据此定位）', thrown?.code, 'EPERM')
+      check('★ 放弃时上报了（onError）', errors.length, 1)
+      check('★ 上报里点名了状态文件', (errors[0] ?? '').includes('b.json'), true)
+      check('★ 上报里点名了尝试次数', (errors[0] ?? '').includes(String(WRITE_RETRY_BACKOFF_MS.length + 1)), true)
+      check('★ 上报说明这份改动没有落盘', (errors[0] ?? '').includes('没有落盘'), true)
+      check('★ 放弃后临时文件被清掉（不留垃圾，也不掩盖问题）', existsSync(tempPath(file)), false)
+      check('★ 放弃**也没有**"重试成功"的记录（它没成功）', retries.length, 0)
+      check('★ 盘上原有的状态没有被破坏（半截写入是这里最不能犯的错）', JSON.stringify(Object.keys(JSON.parse(readFileSync(file, 'utf8')).accounts)), JSON.stringify(['keep']))
+    }
+
+    // ---- 3. 不可重试的错误：一次就放弃，但同样看得见 ----
+    {
+      const file = join(dir, 'c.json')
+      const errors = []
+      const retries = []
+      let calls = 0
+      const store = new StateStore(file, {
+        onError: (m) => errors.push(m),
+        onRetry: (m) => retries.push(m),
+        rename: () => {
+          calls += 1
+          throw occupied('ENOSPC')
+        },
+      })
+      let thrown
+      try {
+        await store.update(() => {})
+      } catch (error) {
+        thrown = error
+      }
+      check('★ ENOSPC 只试一次（磁盘满重试无用，别把坏消息推迟）', calls, 1)
+      check('★ 也不会有"重试成功"的记录', retries.length, 0)
+      check('★ 一次就失败同样可见（不是静默）', errors.length, 1)
+      check('★ 上报里说明了"不可重试"', (errors[0] ?? '').includes('不可重试'), true)
+      check('★ 该错误仍然抛给调用方', thrown?.code, 'ENOSPC')
+      check('★ 没有留下 .tmp', existsSync(tempPath(file)), false)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+}
+
+/*
+ * ---- ★ 静默路径必须留下痕迹（runtime.js）-----------------------------------
+ *
+ * 用户最看重的一条：**"最要紧的是让这种失败可见——静默吞消息且不留日志，是这次真正致命的地方。"**
+ * 这一节把补上日志的每一处各测一条，并且**每一条都配一个"不该记"的负向断言**——
+ * 否则"到处都记一行"也能让正向断言全绿，而那种日志会把有用的行淹掉（本项目已经吃过一次亏）。
+ *
+ * 观测方式：`bootLog` 无论有没有日志文件都会 `console.log` 一份，所以把 `console.log`
+ * 在这几行里换掉就能看到**用户会在 boot.log 里看到的东西**。
+ */
+{
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { QqRuntime } = await import('../lib/runtime.js')
+
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-qq-silence-'))
+  /**
+   * 开始截下 `bootLog` 的输出（它一定 `console.log` 一份）。
+   *
+   * 返回数组是**活的**：异步路径要看的就是"这一行什么时候出现"，所以调用方拿到它、
+   * 把它交给 `waitUntil`，最后再断言。
+   */
+  const startCapture = () => {
+    const lines = []
+    const original = console.log
+    console.log = (...args) => {
+      lines.push(args.map((value) => String(value)).join(' '))
+    }
+    return { lines, stop: () => { console.log = original } }
+  }
+  /**
+   * 等一个断言成立。**等的是"那个效果出现了"，不是固定时长**——
+   * 微信 CI 那次就是"睡固定 80ms 再断言"，而那段在慢机器上要 217–306ms。
+   */
+  const waitUntil = async (predicate, timeoutMs = 5000) => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (predicate()) return true
+      if (Date.now() >= deadline) return false
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+  const runtimeOptions = (file) => ({
+    home: dir,
+    stateFile: file,
+    workspace: join(dir, 'dsh_qq'),
+    credentials: {
+      available: false,
+      save: async () => ({}),
+      load: async () => undefined,
+      remove: async () => {},
+      describe: async () => ({ configured: false }),
+    },
+  })
+
+  /** 一个带可见正文的助手流帧。`sessionId` 省略 = 宿主没给会话 id。 */
+  const frame = (sessionId, text) => ({
+    ...(sessionId === undefined ? {} : { agent: { session: { id: sessionId } } }),
+    frame: { chunk: { type: 'text-delta', text } },
+  })
+
+  try {
+    const runtime = new QqRuntime({ get: () => undefined }, runtimeOptions(join(dir, 'stream.json')))
+    const ORPHAN = 'session-deadbeef-0000-4000-8000-000000000000'
+
+    // ---- 1. 助手流找不到绑定会话：整轮回答丢了，但留下一行 ----
+    {
+      check('前置：确实没有绑定（否则这一节什么都没测）', Object.keys((await runtime.store.read()).bindings).length, 0)
+      const { lines, stop } = startCapture()
+      try {
+        runtime.onAssistantFrame(frame(ORPHAN, '这一轮的回答'))
+        // 帧处理是 `#fire` 出去的异步活：等**那一行出现**，不等时长。
+        await waitUntil(() => lines.some((line) => line.includes('没有 QQ 对话绑定到')))
+      } finally {
+        stop()
+      }
+      const orphan = lines.filter((line) => line.includes('没有 QQ 对话绑定到'))
+      check('★ 助手流找不到绑定会话时日志里有一行（丢了不再是零痕迹）', orphan.length, 1)
+      check('★ 那一行点名了会话 id', (orphan[0] ?? '').includes(ORPHAN), true)
+      check('★ 那一行说明了"回答不会送达"', (orphan[0] ?? '').includes('不会送达'), true)
+    }
+
+    // ---- 2a. 没有会话 id 的**元数据帧**：不记（负向，防止观测手段变成障碍） ----
+    {
+      const { lines, stop } = startCapture()
+      try {
+        runtime.onAssistantFrame({ frame: { chunk: { type: 'usage' } } })
+        runtime.onAssistantFrame({ frame: { chunk: { type: 'block-start', index: 0 } } })
+      } finally {
+        stop()
+      }
+      check('★ 没有正文的元数据帧不记（否则有用的行会被淹掉）', lines.filter((line) => line.includes('没有会话 id')).length, 0)
+    }
+
+    // ---- 2b. 没有会话 id 但**确实带着要送的东西**：正文与回合结束各记一行 ----
+    {
+      const { lines, stop } = startCapture()
+      try {
+        runtime.onAssistantFrame(frame(undefined, '无处投递的正文'))
+        runtime.onAssistantFrame({ frame: { type: 'end' } })
+      } finally {
+        stop()
+      }
+      const withoutSession = lines.filter((line) => line.includes('没有会话 id'))
+      check('★ 带正文的帧记一行（这正是"机器人整个不再回复"的样子）', withoutSession.some((line) => line.includes('7 字正文无处投递')), true)
+      check('★ 没有会话 id 的"回合结束"帧也记（它本该触发发送）', withoutSession.some((line) => line.includes('回合结束帧')), true)
+      check('★ 两种形态各记一次（不是"全局只记第一条"）', withoutSession.length, 2)
+    }
+
+    // ---- 3. 入站消息没有任何可投递内容：用户的消息丢了，但日志里留下一行 ----
+    {
+      const { QQBot } = await import('@tencent-connect/qqbot-nodejs')
+      const listeners = new Map()
+      const realStart = QQBot.prototype.start
+      const realOn = QQBot.prototype.on
+      const realSendText = QQBot.prototype.sendText
+      try {
+        QQBot.prototype.start = async function start() {
+          return undefined
+        }
+        QQBot.prototype.sendText = async function sendText() {
+          return {}
+        }
+        QQBot.prototype.on = function on(event, listener) {
+          const list = listeners.get(event) ?? []
+          list.push(listener)
+          listeners.set(event, list)
+          return this
+        }
+        const connected = new QqRuntime(
+          { get: () => undefined },
+          {
+            ...runtimeOptions(join(dir, 'inbound.json')),
+            credentials: {
+              available: true,
+              save: async () => ({}),
+              load: async (appId) => ({ appId, appSecret: 'secret', userOpenid: 'peer', boundAt: 'x' }),
+              remove: async () => {},
+              describe: async () => ({ configured: true }),
+            },
+          },
+        )
+        await connected.start('111')
+        const handler = (listeners.get('message') ?? [])[0]
+        check('前置：入站处理器挂上了（否则这一节什么都没测）', typeof handler, 'function')
+        const { lines, stop } = startCapture()
+        try {
+          await handler({}, { kind: 'c2c', senderId: 'peer', messageId: 'm-empty', content: '', msgType: 3 })
+        } finally {
+          stop()
+        }
+        const dropped = lines.filter((line) => line.includes('没有可投递内容'))
+        check('★ 空内容的入站消息留下了一行（从前是裸 return，连"收到过"都查不出来）', dropped.length, 1)
+        check('★ 那一行点名了对话与消息 id', (dropped[0] ?? '').includes('111:peer') && (dropped[0] ?? '').includes('m-empty'), true)
+        check('★ 也点名了消息类型（"协议里没映射到的形态"唯一的线索）', (dropped[0] ?? '').includes('msgType=3'), true)
+        /*
+         * ★ 负向：**不进错误环**。
+         *
+         * 这不是随手选的：`scripts/verify-send-path.mjs` 那 60 项拿"空内容的入站消息"当脚手架
+         * （它设计上什么都不碰），把它记成错误会让那些守着的断言变红。这一条把那个约定
+         * **写下来**——将来有人想把它升级成 `#recordError` 时，会先在这里看到理由。
+         */
+        check('★ 但它不算错误（错误环留给真正失败的操作）', (await connected.status()).errors.filter((line) => line.includes('没有可投递内容')).length, 0)
+      } finally {
+        QQBot.prototype.start = realStart
+        QQBot.prototype.on = realOn
+        QQBot.prototype.sendText = realSendText
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  }
+}
+
 console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`)
 process.exit(failures === 0 ? 0 : 1)
