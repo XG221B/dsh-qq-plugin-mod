@@ -161,7 +161,7 @@ along with an offer to set a reminder.
 
 **The computer was locked at that moment** — the phone says 22:43 and so does the lock screen:
 
-<img src="docs/images/locked-screen-desktop.jpg" width="720" alt="The computer's lock screen at the same 22:43: a city-at-night wallpaper with only the time 22:43 and the date 10月13日，星期二 across it, no taskbar and no windows visible">
+<img src="docs/images/locked-screen-desktop.jpg" width="720" alt="The computer's lock screen at the same 22:43: across the screen there is only the clock 22:43 and the date 10月13日，星期二, with no taskbar and no windows visible — a city-at-night photo behind them">
 
 Locking the screen does not stop the agent, so it keeps working after you walk away while the
 conversation on your phone carries on. The reverse is also true: **locking is exactly what you
