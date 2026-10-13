@@ -52,7 +52,7 @@ check('QqRuntime 导出', typeof runtime.QqRuntime, 'function')
 const sessionId = runtime.mintSessionId()
 check('sessionId 形如 session-<8hex>-<uuid>', /^session-[0-9a-f]{8}-[0-9a-f-]{36}$/.test(sessionId), true)
 show('mintSessionId()', sessionId)
-check('shortId 取第二段', runtime.shortId(sessionId), sessionId.split('-')[1])
+check('shortId 与 /list 打印的一致', runtime.shortId(sessionId), sessionId.split('-')[1].slice(0, 6))
 
 const state = await import('../lib/state.js')
 check('conversationKey 只有两维', state.conversationKey('1905760478', 'E56C740F'), '1905760478:E56C740F')
@@ -98,35 +98,475 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('大小写不敏感', JSON.stringify(r.splitCommand('/LIST')), JSON.stringify({ command: '/list', args: '' }))
 
   // resolveTarget
+  // id 用真实的 uuid 形态：尾巴是随机十六进制，所以"1"这种数字不会碰巧被 endsWith 撞上。
   const sessions = [
-    { sessionId: 'session-aaaaaaaa-1111', title: '修复登录', updatedAt: 3 },
-    { sessionId: 'session-bbbbbbbb-2222', title: '北京行程', updatedAt: 2 },
-    { sessionId: 'session-cccccccc-3333', title: '', updatedAt: 1 },
+    { sessionId: 'session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37', title: '修复登录', updatedAt: 3 },
+    { sessionId: 'session-bbbbbbbb-47fd-4e61-bec6-d21d19457f37', title: '北京行程', updatedAt: 2 },
+    { sessionId: 'session-cccccccc-47fd-4e61-bec6-d21d19457f37', title: '', updatedAt: 1 },
   ]
-  check('序号 2', r.resolveTarget('2', sessions)?.sessionId, 'session-bbbbbbbb-2222')
-  check('完整 id', r.resolveTarget('session-cccccccc-3333', sessions)?.sessionId, 'session-cccccccc-3333')
-  check('短 id', r.resolveTarget('aaaaaaaa', sessions)?.sessionId, 'session-aaaaaaaa-1111')
-  check('精确标题', r.resolveTarget('修复登录', sessions)?.sessionId, 'session-aaaaaaaa-1111')
-  check('★ 双向包含：敲片段', r.resolveTarget('北京', sessions)?.sessionId, 'session-bbbbbbbb-2222')
-  check('★ 双向包含：自己加词', r.resolveTarget('北京行程安排', sessions)?.sessionId, 'session-bbbbbbbb-2222')
-  check('找不到时 undefined', r.resolveTarget('不存在的对话', sessions), undefined)
-  check('空参数 undefined', r.resolveTarget('   ', sessions), undefined)
-  check('序号越界不误配', r.resolveTarget('99', sessions), undefined)
-  check('★ 有歧义必须失败', r.resolveTarget('session-', sessions), undefined)
+  /** 解析结果里的会话 id；没命中时印出那个 kind（失败信息里看得出来是歧义还是没找到）。 */
+  const picked = (resolution) => (resolution.kind === 'found' ? resolution.session.sessionId : resolution.kind)
+  /** 一份"用户看到过的清单"：行 + 印在第一行旁边的数字。 */
+  const numbering = (rows, first = 1) => ({ sessions: rows, first })
 
-  const all = [...sessions, { sessionId: 'session-dddddddd-4444', title: '别的项目', updatedAt: 0 }]
-  check('★ 序号按用户看到的列表编号', r.resolveTarget('1', all, sessions)?.sessionId, 'session-aaaaaaaa-1111')
-  check('★ 标题可在全机器范围搜到', r.resolveTarget('别的项目', all, sessions)?.sessionId, 'session-dddddddd-4444')
+  check('序号 2', picked(r.resolveTarget('2', sessions, numbering(sessions))), 'session-bbbbbbbb-47fd-4e61-bec6-d21d19457f37')
+  check('★ 编号带偏移：第二屏的第一行是 11', picked(r.resolveTarget('11', sessions, numbering(sessions, 11))), 'session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37')
+  check('★ 编号带偏移：那一屏之前的数字不折回第 1 行', picked(r.resolveTarget('1', sessions, numbering(sessions, 11))), 'none')
+  check('完整 id', picked(r.resolveTarget('session-cccccccc-47fd-4e61-bec6-d21d19457f37', sessions, numbering(sessions))), 'session-cccccccc-47fd-4e61-bec6-d21d19457f37')
+  check('★ 短 id 是 6 位', r.shortId('session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37'), 'aaaaaa')
+  check('短 id 能切', picked(r.resolveTarget('aaaaaa', sessions, numbering(sessions))), 'session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37')
+  check('★ 更长的前缀也能切（"用更长的 id"这句建议必须真的可用）', picked(r.resolveTarget('aaaaaaaa', sessions, numbering(sessions))), 'session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37')
+  check('印出来的短 id 与切过去用的是同一个', r.resolveTarget(r.shortId(sessions[1].sessionId), sessions, numbering(sessions)).session?.title, '北京行程')
+  check('精确标题', picked(r.resolveTarget('修复登录', sessions, numbering(sessions))), 'session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37')
+  check('★ 双向包含：敲片段', picked(r.resolveTarget('北京', sessions, numbering(sessions))), 'session-bbbbbbbb-47fd-4e61-bec6-d21d19457f37')
+  check('★ 双向包含：自己加词', picked(r.resolveTarget('北京行程安排', sessions, numbering(sessions))), 'session-bbbbbbbb-47fd-4e61-bec6-d21d19457f37')
+  check('找不到时 none', picked(r.resolveTarget('不存在的对话', sessions)), 'none')
+  check('空参数 none', picked(r.resolveTarget('   ', sessions)), 'none')
+  check('序号越界不误配', picked(r.resolveTarget('99', sessions)), 'none')
 
-  const list = r.renderSessionList(sessions.slice(0, 2), 'session-bbbbbbbb-2222', { held: [sessions[2]] })
-  check('列表标出当前', list.includes('← 当前'), true)
-  check('列表有编号', list.includes('1. 修复登录') && list.includes('2. 北京行程'), true)
-  check('★ 列表报出被藏起来的数量', /另有 1 个对话在其它工作区/.test(list), true)
-  check('列表给出切换提示', list.includes('回复数字即可切换'), true)
-  check('relativeTime 刚刚', r.relativeTime(Date.now()), '刚刚')
-  check('relativeTime 分钟', r.relativeTime(Date.now() - 5 * 60_000), '5 分钟前')
-  check('shortId 取中间段', r.shortId('session-5843df2a-501d'), '5843df2a')
+  const all = [...sessions, { sessionId: 'session-dddddddd-47fd-4e61-bec6-d21d19457f37', title: '别的项目', updatedAt: 0 }]
+  check('★ 序号按用户看到的列表编号', picked(r.resolveTarget('1', all, numbering(sessions))), 'session-aaaaaaaa-47fd-4e61-bec6-d21d19457f37')
+  check('★ 标题可在全机器范围搜到', picked(r.resolveTarget('别的项目', all, numbering(sessions))), 'session-dddddddd-47fd-4e61-bec6-d21d19457f37')
 
+  // 短 id 撞车：id 太短必须**问回去**，而不是猜一个
+  const clash = [
+    { sessionId: 'session-e716f0aa-e716f0aa-47fd', title: '写周报', updatedAt: 2 },
+    { sessionId: 'session-e716f0bb-e716f0bb-47fd', title: '查天气', updatedAt: 1 },
+  ]
+  const ambiguous = r.resolveTarget('e716f0', clash, numbering(clash))
+  check('★ 两个会话共用一个短 id → 有歧义（不猜）', ambiguous.kind, 'ambiguous')
+  const clashMessage = r.ambiguousTargetMessage('e716f0', ambiguous.candidates)
+  check('★ 撞车时说明"请用更长的 id"', clashMessage.includes('更长的 id'), true)
+  check('★ 候选带上更长的前缀（那正是用户该回的东西）', clashMessage.includes('e716f0aa') && clashMessage.includes('e716f0bb'), true)
+  check('★ 候选带上标题（人认得出的是对话）', clashMessage.includes('写周报') && clashMessage.includes('查天气'), true)
+  check('多给一位就唯一了', picked(r.resolveTarget('e716f0a', clash, numbering(clash))), 'session-e716f0aa-e716f0aa-47fd')
+
+  // 分页：每屏 10 条，编号跨屏连续
+  const many = Array.from({ length: 25 }, (_, index) => ({
+    sessionId: `session-${(index + 1).toString(16).padStart(6, '0')}-0000`,
+    title: `对话${index + 1}`,
+    updatedAt: 1_000 - index,
+  }))
+  check('★ 每屏 10 条', r.BROWSE_PAGE_SIZE, 10)
+  check('25 条 = 3 屏', r.browsePage(many, 1).pages, 3)
+  check('第 1 屏 10 条', r.browsePage(many, 1).items.length, 10)
+  check('★ 第 2 屏从第 11 行开始', r.browsePage(many, 2).start, 10)
+  check('★ 第 2 屏就是 11–20', r.browsePage(many, 2).items[0].title, '对话11')
+  check('★ 越界的屏号被夹到最后一屏（而不是一条空消息）', JSON.stringify([r.browsePage(many, 99).page, r.browsePage(many, 99).items.length]), JSON.stringify([3, 5]))
+  check('★ screenRows 的 first 就是印在第一行旁边的数字', r.screenRows(many, 2).first, 11)
+  check('screenRows 只取那一屏', r.screenRows(many, 3).sessions.length, 5)
+  check('★「查看其余」就是这句话', r.SHOW_REST, '查看其余')
+  check('★ 句读不影响认这句话', JSON.stringify([r.isShowRest('查看其余'), r.isShowRest('查看其余。'), r.isShowRest('查看其余！')]), JSON.stringify([true, true, true]))
+  check('★ 近似的说法不认（这句话没有目标，猜不得）', JSON.stringify([r.isShowRest('继续'), r.isShowRest('看其余')]), JSON.stringify([false, false]))
+
+  // 一屏会话：标题、时间、行尾短 id，以及"还能不能翻"
+  const NOW = 1_800_000_000_000
+  const ownTwelve = many.slice(0, 12)
+  const screen1 = r.renderSessionScreen(ownTwelve, { label: 'QQ 会话', page: 1, currentId: ownTwelve[0].sessionId, now: NOW })
+  const rowLines = (text) => text.split('\n').filter((line) => /^\d+\. /.test(line))
+  check('标题带会话夹与屏号', screen1.text.startsWith('【QQ 会话】会话（1/2）'), true)
+  check('★ 第 1 屏十条', rowLines(screen1.text).length, 10)
+  check('★ 行尾短 id 出现在每一行', rowLines(screen1.text).every((line) => /\s[0-9a-f]{6}$/.test(line)), true)
+  check('★ 当前会话被标出', screen1.text.includes('← 当前'), true)
+  check('★ 有下一页时邀请翻页', screen1.text.includes('回复「查看其余」看下十个'), true)
+  check('★ 行尾 id 被点名，而不只是印出来', screen1.text.includes('行尾 6 位 id'), true)
+  check('★ 引用能冻结编号——这句话必须说出来', screen1.text.includes('引用这条消息再回编号'), true)
+  const screen2 = r.renderSessionScreen(ownTwelve, { label: 'QQ 会话', page: 2, now: NOW })
+  check('★ 第 2 屏的编号接着 11 起', screen2.text.includes('11. 对话11'), true)
+  check('★ 第 2 屏 first = 11', screen2.numbered.first, 11)
+  check('第 2 屏只印剩下的两条', screen2.numbered.sessions.length, 2)
+  check('★ 翻到底就不再邀请翻页', screen2.text.includes('查看其余'), false)
+  check('★ 翻到底仍然报出出路', screen2.text.includes('回复编号或行尾 6 位 id 切换。'), true)
+  check('空会话夹说明而不是空白', r.renderSessionScreen([], { label: 'QQ 会话', page: 1, now: NOW }).text.includes('（这个会话夹还没有对话）'), true)
+  const longTitle = '这是一句很长的标题'.repeat(4)
+  const longRow = r.renderSessionRow({ sessionId: 'session-aaaaaa-0000', title: longTitle, updatedAt: 0 }, 0, undefined, NOW)
+  check('★ 超长标题裁到 24 字加省略号（时间与 id 才是这一行的用处）', longRow.includes(`${longTitle.slice(0, 24)}…`), true)
+  check('★ 超长标题不是整段印出来', longRow.includes(longTitle), false)
+
+  // 会话夹那一层
+  const folders = r.sessionFolders(
+    [
+      { sessionId: 's1', title: 'a', updatedAt: 1, workspace: 'C:\\me\\dsh_qq' },
+      { sessionId: 's2', title: 'b', updatedAt: 9, workspace: 'C:\\me\\项目甲' },
+      { sessionId: 's3', title: 'c', updatedAt: 5, workspace: 'C:\\me\\项目甲' },
+      { sessionId: 's4', title: 'd', updatedAt: 4, workspace: 'C:\\me\\项目乙' },
+      { sessionId: 's5', title: 'e', updatedAt: 2 },
+    ],
+    { ownWorkspace: 'C:\\me\\dsh_qq', ownLabel: 'QQ 会话' },
+  )
+  check('★ 本工作区排第一', `${folders[0].label}:${folders[0].count}`, 'QQ 会话:2')
+  check('★ 其余按最近活跃排，目录名做平手时的次序', folders.map((folder) => folder.label).join(','), 'QQ 会话,项目甲,项目乙')
+  check('★ 每个会话夹带会话数', folders.map((folder) => folder.count).join(','), '2,2,1')
+  check('★ 没有记录目录的行算本频道自己的（那是唯一能为之背书的工作区）', folders.length, 3)
+  const folderScreen = r.renderFolderScreen(folders, 1)
+  check('会话夹那一层的标题', folderScreen.startsWith('会话夹（1/1）'), true)
+  check('会话夹行带名字与会话数', folderScreen.includes('1. QQ 会话  2 个会话'), true)
+  check('会话夹行编号连续', folderScreen.includes('3. 项目乙  1 个会话'), true)
+  check('★ 只有一屏时不邀请翻页', folderScreen.includes('查看其余'), false)
+  const manyFolders = Array.from({ length: 12 }, (_, index) => ({ path: `C:\\p${String(index)}`, label: `夹${String(index)}`, count: index + 1 }))
+  check('★ 会话夹也编号跨屏连续（11–12）', r.renderFolderScreen(manyFolders, 2).includes('11. 夹10  11 个会话'), true)
+  check('★ 会话夹还没到底时邀请翻页', r.renderFolderScreen(manyFolders, 1).includes('回复「查看其余」看下十个'), true)
+
+  // 进会话夹：编号、名字、片段都认；有歧义必须问回去
+  check('会话夹按编号', r.resolveFolder('2', folders).folder?.label, '项目甲')
+  check('会话夹按名字', r.resolveFolder('项目乙', folders).folder?.label, '项目乙')
+  check('★ 会话夹按片段（人是这么称呼项目的）', r.resolveFolder('甲', folders).folder?.label, '项目甲')
+  check('会话夹找不到 → none', r.resolveFolder('不存在的项目', folders).kind, 'none')
+  const twinFolders = [
+    { path: 'C:\\a\\workplace', label: 'workplace', count: 1 },
+    { path: 'D:\\b\\workplace', label: 'workplace', count: 2 },
+  ]
+  const twin = r.resolveFolder('workplace', twinFolders)
+  check('★ 两个同名会话夹 → 有歧义（进错项目比多问一句更糟）', twin.kind, 'ambiguous')
+  check('★ 歧义文案给出编号', r.ambiguousFolderMessage('workplace', twin.candidates, twinFolders).includes('2. D:\\b\\workplace  2 个会话'), true)
+
+  // 本工作区空、别处有：数出来并点名，而不是让它们消失
+  const held = [{ sessionId: 's2', title: 'b', updatedAt: 1, workspace: 'C:\\me\\项目甲' }]
+  check('★ 本工作区空时也给出路', r.heldOnlyList(held, 'QQ 会话').includes('发 /list all 看会话夹'), true)
+  check('本工作区空时点名别的工作区', r.heldOnlyList(held, 'QQ 会话').includes('（项目甲）'), true)
+  check('★ heldNames 去重、排序、取末段', JSON.stringify(r.heldNames([...held, ...held, { sessionId: 's9', title: 'z', workspace: 'C:\\b' }])), JSON.stringify(['b', '项目甲']))
+  check('一行会话屏里的"其余的在哪"也点名工作区', r.renderSessionScreen(ownTwelve.slice(0, 2), { label: 'QQ 会话', page: 1, now: NOW, held: { count: 3, names: ['项目甲'] } }).text.includes('（项目甲）'), true)
+  check('★ "其余"那句话在别人的会话夹里不出现（那是他自己选的夹子）', r.renderSessionScreen(ownTwelve.slice(0, 2), { label: '项目甲', page: 1, now: NOW }).text.includes('其它会话夹'), false)
+
+  check('★ workspaceLabel 只取末段', r.workspaceLabel('C:\\Users\\me\\.dsh\\dsh_qq'), 'dsh_qq')
+  check('relativeTime 刚刚', r.relativeTime(NOW, NOW), '刚刚')
+  check('relativeTime 分钟', r.relativeTime(NOW - 5 * 60_000, NOW), '5 分钟前')
+  check('relativeTime 昨天（24–48 小时）', r.relativeTime(NOW - 25 * 3_600_000, NOW), '昨天')
+  check('★ 帮助里给出分页与「查看其余」', r.HELP_TEXT.includes('查看其余') && r.HELP_TEXT.includes('每屏最多 10 条'), true)
+  check('★ 帮助里 /list all 说的是会话夹', r.HELP_TEXT.includes('列出全部会话夹'), true)
+  check('★ 帮助里 /switch 说明了引用能冻结编号', r.HELP_TEXT.includes('引用列表消息再回编号'), true)
+  check('★ 帮助里 /switch <id> 说明行尾那 6 位', r.HELP_TEXT.includes('/switch e716f0'), true)
+  check('★ 帮助里说明了"列表在眼前时直接回编号"', r.HELP_TEXT.includes('不必打 /switch'), true)
+
+}
+
+// ---- `/list` `/list all` `/switch` 端到端：两层、分页、引用冻结 -------------
+/*
+ * 这一节用假宿主跑**整条链路**（路由 + `delivered` 落位），因为要证明的东西全都是
+ * "跨若干条消息才有意义"的：编号跨屏连续、引用把旧编号钉住、进会话夹不改绑定、
+ * 「查看其余」翻到底之后的措辞。
+ *
+ * ⚠️ 它证明的是**逻辑与断言符合微信的契约**，不是"手机上看起来一样"——
+ * 那要有真机与运行中的 DSH 才谈得上。
+ */
+{
+  const r = await import('../lib/router.js')
+
+  const SELF = 'C:\\me\\dsh_qq'
+  const CONV = { conversationId: '111:peer', accountId: '111', peerId: 'peer' }
+
+  /** 一条会话索引行：id 中间那段是 6 位十六进制（与真实铸造出来的同形）。 */
+  const row = (n, updatedAt) => ({
+    sessionId: `session-${n.toString(16).padStart(6, '0')}-0000`,
+    title: `对话${n}`,
+    updatedAt,
+  })
+
+  /** 一份清单正文里的会话行。 */
+  const rowLines = (text) => text.split('\n').filter((line) => /^\d+\. /.test(line))
+
+  /**
+   * 假宿主 + 假状态存储。
+   *
+   * 状态是**内存里的**，但形状与状态文件完全一致（`browsing` / `sessionLists`），
+   * 所以"换一个路由实例从同一个 store 读回"这条路可以真的测到——
+   * 那正是"重启之后引用仍然有效"的等价物。
+   */
+  const harness = ({ own = [], others = {} } = {}) => {
+    const machine = () =>
+      [...own, ...Object.entries(others).flatMap(([workspace, rows]) => rows.map((session) => ({ ...session, workspace })))]
+    const byNewest = (a, b) => b.updatedAt - a.updatedAt
+    const saved = { bindings: {}, browsing: {}, sessionLists: {} }
+    const store = {
+      load: async () => saved.bindings,
+      save: async (bindings) => {
+        saved.bindings = bindings
+      },
+      loadRouteState: async () => ({ browsing: saved.browsing, sessionLists: saved.sessionLists }),
+      saveRouteState: async (state) => {
+        saved.browsing = state.browsing
+        saved.sessionLists = state.sessionLists
+      },
+    }
+    const gateway = {
+      ensureSession: async () => {},
+      prompt: async () => {},
+      cancel: async () => {},
+      listSessions: async () => machine().sort(byNewest),
+      listOwnSessions: async () => [...own].sort(byNewest),
+      listModels: async () => [],
+      currentModel: async () => undefined,
+      selectModel: async () => {
+        throw new Error('这一节不测模型')
+      },
+    }
+    const router = new r.SessionRouter({
+      gateway,
+      store,
+      titlePrefix: 'QQ',
+      ownWorkspace: SELF,
+      ownWorkspaceLabel: 'QQ 会话',
+    })
+    return { router, store, own, others, saved, live: () => [...own].sort(byNewest) }
+  }
+
+  /** 路由一条消息，并按"真的发出去了"落位——与 `runtime.#deliverPrompt` 同序。 */
+  const send = async (h, text, quoted) => {
+    const routed = await h.router.route({ ...CONV, text, ...(quoted === undefined ? {} : { quoted }) })
+    if (routed.kind === 'reply') await h.router.delivered(CONV.conversationId, routed)
+    return routed
+  }
+  /** 本对话当前绑定的会话 id。 */
+  const bound = async (h) => (await h.router.current(CONV.conversationId))?.sessionId
+
+  // ---- 一、分页、短 id、以及"列表就在眼前时直接回编号" ----
+  {
+    const h = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    check('首条消息交给 agent（还没有清单可看）', (await send(h, '你好')).kind, 'prompt')
+
+    const listed = await send(h, '/list')
+    check('★ /list 直接进本工作区那一层', listed.text.startsWith('【QQ 会话】会话（1/3）'), true)
+    check('★ 每屏 10 条', rowLines(listed.text).length, 10)
+    check('★ 行尾短 id 就是印出来的那个', listed.text.includes(r.shortId(h.live()[0].sessionId)), true)
+    check('★ 有下一页时邀请翻页', listed.text.includes('回复「查看其余」看下十个'), true)
+    check('★ /list 之后位置落在第一屏', JSON.stringify(h.saved.browsing[CONV.conversationId]), JSON.stringify({ level: 'sessions', workspace: '', page: 1, at: h.saved.browsing[CONV.conversationId].at }))
+
+    const page2 = await send(h, '查看其余')
+    check('★ 翻十条：第 2 屏', page2.text.startsWith('【QQ 会话】会话（2/3）'), true)
+    check('★ 编号跨屏连续：第 2 屏是 11–20', JSON.stringify([page2.numbered.first, page2.numbered.sessions.length, page2.text.includes('11. 对话11')]), JSON.stringify([11, 10, true]))
+    check('还没到底，仍然邀请翻页', page2.text.includes('查看其余'), true)
+    check('★ 位置推到第二屏', h.saved.browsing[CONV.conversationId].page, 2)
+
+    const page3 = await send(h, '查看其余。')
+    check('★ 句读不挡翻页', page3.text.startsWith('【QQ 会话】会话（3/3）'), true)
+    check('★ 最后一屏不邀请翻页', page3.text.includes('查看其余'), false)
+    check('★ 最后一屏仍然报出出路', page3.text.includes('回复编号或行尾 6 位 id 切换。'), true)
+    check('第 3 屏只印剩下的 5 条', rowLines(page3.text).length, 5)
+
+    const bottom = await send(h, '查看其余')
+    check('★ 翻到底明说，且说的是"只有 3 页"', bottom.text.split('\n')[0], '【QQ 会话】只有 3 页，已经到底了。')
+    check('★ 到底之后不再邀请翻页', bottom.text.includes('查看其余'), false)
+    check('★ 到底之后仍然报出出路', bottom.text.includes('回复编号或行尾 6 位 id 切换'), true)
+    check('★ 到底时位置留着（用户显然还在读）', h.saved.browsing[CONV.conversationId].page, 3)
+
+    // 短 id 与编号无关：它在第 20 行，而当前屏是 21–25
+    const byId = await send(h, `/switch ${r.shortId(h.live()[19].sessionId)}`)
+    check('★ /switch <短 id> 与编号无关', await bound(h), h.live()[19].sessionId)
+    check('★ 短 id 永远不会过期（不在当前屏也切得到）', byId.text.includes('已切换到「对话20」'), true)
+    check('★ 一次切换结束这次浏览（位置清掉）', h.saved.browsing[CONV.conversationId], undefined)
+
+    // 反向对照：清单不在眼前时，一个光秃秃的编号不是"一步"，它该去 agent
+    check('★ 没有清单在眼前时，裸数字交给 agent（不是切换）', (await send(h, '3')).kind, 'prompt')
+
+    // 清单就在眼前时不用打 /switch
+    await send(h, '/list')
+    const bare = await send(h, '3')
+    check('★ 直接回 3 就等于 /switch 3', bare.kind, 'reply')
+    check('★ 裸数字按那一屏读', await bound(h), h.live()[2].sessionId)
+    check('切换之后浏览结束', h.saved.browsing[CONV.conversationId], undefined)
+  }
+
+  // ---- 二、引用冻结编号（以及"编号会过期"的反向对照）----
+  {
+    const h = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h, '你好')
+    await send(h, '/list')
+    const screen = await send(h, '查看其余')
+    const frozenText = screen.text
+    const frozen = screen.numbered
+
+    // 用户读清单时会话还在跑：先塞 5 条"更新"的，活清单的第 3 行已经换人了
+    for (let index = 0; index < 5; index += 1) h.own.push(row(100 + index, 5_000 + index))
+    check('前置：活清单第 12 行已经不是那一屏的第 12 行', h.live()[11].sessionId !== frozen.sessions[1].sessionId, true)
+
+    const quoted = await send(h, '12', frozenText)
+    check('★ 引用那一屏 + 回编号 = 按那一屏解析', await bound(h), frozen.sessions[1].sessionId)
+    check('★ 引用冻结的编号不会漂到"现在最新的"上', (await bound(h)) !== h.live()[11].sessionId, true)
+    check('引用之后浏览结束', h.saved.browsing[CONV.conversationId], undefined)
+
+    /*
+     * 反向对照：**不引用**时读的是"本对话最近收到的那一屏"，仍然不是活清单。
+     * 少掉"钉住"这一步，"12"就会落到活清单的第 12 行——也就是另一条会话。
+     */
+    const h2 = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h2, '你好')
+    await send(h2, '/list')
+    const screen2 = await send(h2, '查看其余')
+    for (let index = 0; index < 5; index += 1) h2.own.push(row(100 + index, 5_000 + index))
+    await send(h2, '12')
+    check('★ 不引用时读最近那一屏（不是活清单）', await bound(h2), screen2.numbered.sessions[1].sessionId)
+    check('★ 活清单的第 12 行确实换人了（否则上面那条没有鉴别力）', h2.live()[11].sessionId !== screen2.numbered.sessions[1].sessionId, true)
+
+    // 引用到一条**不是清单**的消息：落到"最近一屏"，与没有引用时同一条路
+    const h3 = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h3, '你好')
+    await send(h3, '/list')
+    const screen3 = await send(h3, '查看其余')
+    await send(h3, '12', '早上好啊这是一句普通消息')
+    check('★ 引用非清单时回落"最近一屏"', await bound(h3), screen3.numbered.sessions[1].sessionId)
+
+    /*
+     * 跨屏：引用的是一份**印过 11–20 的**旧消息，而屏幕上现在是第一屏（1–10）。
+     * 若按当前屏读，"13"落在 1–10 之外 → 不是一步 → 会交给 agent。
+     */
+    const h4 = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h4, '你好')
+    await send(h4, '/list')
+    const oldScreen = await send(h4, '查看其余')
+    await send(h4, '/list')
+    const oldQuote = await send(h4, '13', oldScreen.text)
+    check('★ 引用一屏旧清单：13 仍按那一屏（11–20）解析', oldQuote.kind === 'reply' && (await bound(h4)) === oldScreen.numbered.sessions[2].sessionId, true)
+
+    /*
+     * 重启：换一个路由实例，从**同一个 store** 读回状态。
+     * 编号清单是落盘的，所以引用仍然有效——这正是微信把编号写进状态文件的理由。
+     */
+    const h5 = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h5, '你好')
+    await send(h5, '/list')
+    const beforeRestart = await send(h5, '查看其余')
+    const restarted = new r.SessionRouter({
+      gateway: {
+        ensureSession: async () => {},
+        prompt: async () => {},
+        cancel: async () => {},
+        listSessions: async () => h5.live(),
+        listOwnSessions: async () => h5.live(),
+      },
+      store: h5.store,
+      titlePrefix: 'QQ',
+      ownWorkspace: SELF,
+      ownWorkspaceLabel: 'QQ 会话',
+    })
+    const afterRestart = await restarted.route({ ...CONV, text: '14', quoted: beforeRestart.text })
+    await restarted.delivered(CONV.conversationId, afterRestart)
+    check('★ 重启后引用仍然钉得住（编号清单是落盘的）', (await restarted.current(CONV.conversationId))?.sessionId, beforeRestart.numbered.sessions[3].sessionId)
+
+    // 「查看其余」接的也是**存下来的**位置：重启前停在第二屏，重启后就该翻到第三屏
+    const h6 = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h6, '你好')
+    await send(h6, '/list')
+    await send(h6, '查看其余')
+    const restarted2 = new r.SessionRouter({
+      gateway: {
+        ensureSession: async () => {},
+        prompt: async () => {},
+        cancel: async () => {},
+        listSessions: async () => h6.live(),
+        listOwnSessions: async () => h6.live(),
+      },
+      store: h6.store,
+      titlePrefix: 'QQ',
+      ownWorkspace: SELF,
+      ownWorkspaceLabel: 'QQ 会话',
+    })
+    check('★ 重启后「查看其余」仍然接着翻（位置是落盘的）', (await restarted2.route({ ...CONV, text: '查看其余' })).text.startsWith('【QQ 会话】会话（3/3）'), true)
+  }
+
+  // ---- 三、会话夹那一层：进入只改浏览位置，不改绑定 ----
+  {
+    const h = harness({
+      own: [row(1, 100), row(2, 90), row(3, 80)],
+      others: { 'C:\\me\\项目甲': [row(11, 300), row(12, 200)], 'C:\\me\\项目乙': [row(21, 50)] },
+    })
+    await send(h, '你好')
+    const before = await bound(h)
+
+    const folders = await send(h, '/list all')
+    check('★ /list all 列出会话夹', folders.text.startsWith('会话夹（1/1）'), true)
+    check('★ 每个会话夹一行、带会话数', folders.text.includes('1. QQ 会话  3 个会话') && folders.text.includes('2. 项目甲  2 个会话'), true)
+    check('★ 会话夹按最近活跃排', folders.text.includes('3. 项目乙  1 个会话'), true)
+    check('会话夹那一层不编号会话（那是夹子，不是对话）', folders.numbered, undefined)
+
+    const entered = await send(h, '2')
+    check('★ 回编号进入会话夹', entered.text.startsWith('【项目甲】会话（1/1）'), true)
+    check('★ 进去了就看到那个夹子的会话', entered.text.includes('1. 对话11'), true)
+    check('★★ 进会话夹只改浏览位置，不改绑定', await bound(h), before)
+    check('★ 位置落在那个会话夹的会话层', JSON.stringify([h.saved.browsing[CONV.conversationId].level, h.saved.browsing[CONV.conversationId].workspace]), JSON.stringify(['sessions', 'C:\\me\\项目甲']))
+
+    // 从夹子那一层直接回名字也进得去
+    await send(h, '/list all')
+    const byName = await send(h, '项目乙')
+    check('★ 会话夹按名字进入', byName.text.startsWith('【项目乙】会话（1/1）'), true)
+    check('进第二个夹子仍然不改绑定', await bound(h), before)
+
+    // 在里面再选一个会话，这才是"切过去"
+    const chosen = await send(h, '1')
+    check('★ 在夹子里回编号才真的切过去', await bound(h), h.others['C:\\me\\项目乙'][0].sessionId)
+    check('切换之后浏览结束', h.saved.browsing[CONV.conversationId], undefined)
+
+    // 反向对照：夹子里越界的编号不是"一步"，交给 agent
+    await send(h, '/list all')
+    await send(h, '项目乙')
+    check('★ 夹子里越界的编号交给 agent（不猜）', (await send(h, '9')).kind, 'prompt')
+
+    // 同名会话夹：必须问回去，而不是进错一个
+    const twins = harness({
+      own: [row(1, 100)],
+      others: { 'C:\\a\\workplace': [row(11, 300)], 'D:\\b\\workplace': [row(21, 200)] },
+    })
+    await send(twins, '你好')
+    const twinBefore = await bound(twins)
+    await send(twins, '/list all')
+    const ambiguous = await send(twins, 'workplace')
+    check('★ 同名会话夹问回去', ambiguous.text.startsWith('有多个会话夹匹配「workplace」'), true)
+    check('★ 歧义时点出编号与完整路径', ambiguous.text.includes('3. D:\\b\\workplace  1 个会话'), true)
+    check('★ 歧义时什么都不进（绑定与位置都不变）', await bound(twins), twinBefore)
+    check('歧义时位置留在会话夹那一层', twins.saved.browsing[CONV.conversationId].level, 'folders')
+    const resolved = await send(twins, '3')
+    check('回复编号就进得去', resolved.text.startsWith('【workplace】会话（1/1）'), true)
+    check('进的是那一个（按路径分的，不是按名字）', twins.saved.browsing[CONV.conversationId].workspace, 'D:\\b\\workplace')
+
+    // 会话夹那一层也要能翻，而且用的是**同一句**「查看其余」
+    const manyFolders = harness({
+      own: [row(1, 100)],
+      others: Object.fromEntries(
+        Array.from({ length: 12 }, (_, index) => [
+          `C:\\me\\项目${String(index).padStart(2, '0')}`,
+          [row(50 + index, 500 - index)],
+        ]),
+      ),
+    })
+    await send(manyFolders, '你好')
+    const folderPage1 = await send(manyFolders, '/list all')
+    check('★ 会话夹每屏 10 个', rowLines(folderPage1.text).length, 10)
+    check('★ 会话夹还没到底时邀请翻页', folderPage1.text.includes('回复「查看其余」看下十个'), true)
+    const folderPage2 = await send(manyFolders, '查看其余')
+    check('★ 会话夹也翻十条，编号接着 11 起', JSON.stringify([folderPage2.text.includes('11. 项目09  1 个会话'), folderPage2.text.includes('13. 项目11  1 个会话')]), JSON.stringify([true, true]))
+    check('★ 会话夹最后一屏不邀请翻页', folderPage2.text.includes('查看其余'), false)
+    const folderBottom = await send(manyFolders, '查看其余')
+    check('★ 会话夹翻到底的措辞', folderBottom.text.split('\n')[0], '会话夹只有 2 页，已经到底了。')
+    check('★ 到底时仍然给出路（回编号或名字进入）', folderBottom.text.includes('回复编号或名字进入。'), true)
+    check('★ 到底时位置留着（用户显然还在读）', manyFolders.saved.browsing[CONV.conversationId].level, 'folders')
+  }
+
+  // ---- 四、本工作区空、以及浏览位置过期 ----
+  {
+    const h = harness({ own: [], others: { 'C:\\me\\项目甲': [row(11, 300), row(12, 200)] } })
+    const listed = await send(h, '/list')
+    check('★ 本工作区空时说出来，而不是一条空清单', listed.text.includes('【QQ 会话】还没有对话'), true)
+    check('★ 并点数出别的会话夹', listed.text.includes('另有 2 个对话在其它会话夹（项目甲）'), true)
+    check('★ 没有东西可翻时不留下位置', h.saved.browsing[CONV.conversationId], undefined)
+    check('★ /list all 仍然能列出会话夹', (await send(h, '/list all')).text.includes('1. 项目甲  2 个会话'), true)
+
+    const empty = harness()
+    check('★ 一台机器一条会话都没有时也有一句人话', (await send(empty, '/list')).text, '还没有任何对话，直接发消息就会新建一个。')
+    check('★ /switch 找不到时说的是人话', (await send(empty, '/switch 不存在的对话')).text.startsWith('找不到这个对话'), true)
+
+    /*
+     * 位置过期：`at` 是给"用户走开了"用的。过期之后「查看其余」没有可接着的东西，
+     * 于是那句话只是一句普通消息（交给 agent），位置也被丢掉。
+     */
+    const stale = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    stale.saved.browsing[CONV.conversationId] = {
+      level: 'sessions',
+      workspace: '',
+      page: 2,
+      at: Date.now() - (r.BROWSE_IDLE_MS + 60_000),
+    }
+    check('★ 过期位置上的「查看其余」不再算一步', (await send(stale, '查看其余')).kind, 'prompt')
+    check('★ 过期位置被清掉', stale.saved.browsing[CONV.conversationId], undefined)
+  }
 }
 
 // ---- 切换模型：`/model` 的两条行为（列出 / 切换）---------------------------
@@ -138,8 +578,31 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
   const models = [
     { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-chat', name: 'DeepSeek Chat' },
-    { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
-    { provider: 'other', providerName: 'Other', model: 'gpt-x', name: 'GPT X' },
+    {
+      provider: 'deepseek-account',
+      providerName: 'DeepSeek',
+      model: 'deepseek-reasoner',
+      name: 'DeepSeek Reasoner',
+      // 本机自带的 DeepSeek 适配器发布的就是这四个（`dsh-llm-deepseek` 的 REASONING_EFFORTS）。
+      levels: [
+        { id: 'off', name: 'Off' },
+        { id: 'low', name: 'Low' },
+        { id: 'high', name: 'High' },
+        { id: 'max', name: 'Max' },
+      ],
+      defaultLevel: 'high',
+    },
+    {
+      provider: 'other',
+      providerName: 'Other',
+      model: 'gpt-x',
+      name: 'GPT X',
+      levels: [
+        { id: 'low', name: 'Low' },
+        { id: 'high', name: 'High' },
+      ],
+      defaultLevel: 'low',
+    },
   ]
 
   // splitCommand：空参数必须落进"没有参数"这一支，而 `/models` 不能被吃成 `/model` + `s`
@@ -162,7 +625,8 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('空参数 undefined', r.resolveModel('   ', models), undefined)
   check('编号越界不误配', r.resolveModel('99', models), undefined)
 
-  // renderModelList：编号必须能被 `/model <编号>` 选到（与 /list 同一份编号契约）
+  // renderModelList：编号必须能被 `/model <编号>` 选到（与 /list 同一份编号契约），
+  // 而且每个模型要带上它自己的推理等级——那是用户在手机上唯一看得到它的地方。
   const listText = r.renderModelList(models, { provider: 'deepseek-account', model: 'deepseek-chat' })
   check('列表标出当前模型', listText.includes('← 当前'), true)
   check('列表有编号与显示名', listText.includes('1. DeepSeek Chat'), true)
@@ -172,6 +636,55 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('★ 空目录有明确说明而不是空回复', r.renderModelList([], undefined).includes('宿主没有报出可用的模型'), true)
   check('★ 帮助里列出了 /model', r.HELP_TEXT.includes('/model'), true)
   check('★ 帮助里说明 /model 带参数是切换', r.HELP_TEXT.includes('/model <名字>'), true)
+  check('★ 帮助里有「/model 等级」这一行', r.HELP_TEXT.includes('/model 等级 <等级>'), true)
+  // 没有什么模型带等级时，不许邀请用户去改一个没人支持的设置
+  const plain = r.renderModelList([models[0]], { provider: 'deepseek-account', model: 'deepseek-chat' })
+  check('★ 没有等级时不提等级', JSON.stringify([plain.includes('推理等级'), plain.includes('/model 等级')]), JSON.stringify([false, false]))
+
+  // 每个模型的等级：印出来、标出生效的那个、例子取自数据
+  const withLevels = r.renderModelList(models, {
+    provider: 'deepseek-account',
+    model: 'deepseek-reasoner',
+    reasoningEffort: 'high',
+  })
+  check('★ 当前模型的等级被标出（当前）', withLevels.includes('推理等级：Off · Low · High（当前） · Max'), true)
+  check('★ 别的模型标的是宿主默认值（默认），不是"当前"', withLevels.includes('推理等级：Low（默认） · High'), true)
+  check('★ 标题里也报出当前等级', withLevels.includes('当前是 deepseek-account/deepseek-reasoner · High'), true)
+  check('★ 例子取自目录（不臆造等级 id）', withLevels.includes('例如 /model 等级 high。'), true)
+  check('★ 例子取的是模型的默认等级，不是列表第一个（off 是个坏示范）', withLevels.includes('例如 /model 等级 high。') && !withLevels.includes('例如 /model 等级 off'), true)
+  // 宿主没报出等级、但模型自己有默认值时，按"宿主会应用的那个"标出来
+  const noEffort = r.renderModelList(models, { provider: 'deepseek-account', model: 'deepseek-reasoner' })
+  check('★ 宿主没报等级时用模型自己的默认等级来标', noEffort.includes('High（当前）'), true)
+
+  // 模型没有等级时"没有"要说出来（三种来历同一句）
+  const noLevel = r.renderLevels(models[0], { provider: 'deepseek-account', model: 'deepseek-chat' }, [])
+  check('模型的等级屏：没有等级时不印空行', noLevel.includes('Off'), false)
+
+  // parseModelCommand：等级是**关键字**说出来的，不靠位置猜
+  check('★ 空参数 = 说模型且没有等级', JSON.stringify(r.parseModelCommand('')), JSON.stringify({ target: '', levelForm: false }))
+  check('★ 纯模型名还是纯模型名（等级出现之前的形态没变）', JSON.stringify(r.parseModelCommand('deepseek-chat')), JSON.stringify({ target: 'deepseek-chat', levelForm: false }))
+  check('★「等级 high」= 只改等级', JSON.stringify(r.parseModelCommand('等级 high')), JSON.stringify({ target: '', level: 'high', levelForm: true }))
+  check('★「2 等级 high」= 换模型同时指定等级', JSON.stringify(r.parseModelCommand('2 等级 high')), JSON.stringify({ target: '2', level: 'high', levelForm: true }))
+  check('★「推理等级 高」按后缀也认（设置项的完整名字）', JSON.stringify(r.parseModelCommand('推理等级 高')), JSON.stringify({ target: '', level: '高', levelForm: true }))
+  check('level / effort / reasoning 三个英文词都认', JSON.stringify([r.parseModelCommand('level high').levelForm, r.parseModelCommand('effort low').levelForm, r.parseModelCommand('reasoning max').levelForm]), JSON.stringify([true, true, true]))
+  check('★ 只写关键字不写等级也算"在说等级"（好回一句"缺等级"）', JSON.stringify(r.parseModelCommand('等级')), JSON.stringify({ target: '', levelForm: true }))
+  check('★ 多词的模型名整段保留', JSON.stringify(r.parseModelCommand('DeepSeek Reasoner 等级 max')), JSON.stringify({ target: 'DeepSeek Reasoner', level: 'max', levelForm: true }))
+
+  // resolveLevel：宿主发布什么就认什么，只差大小写
+  const levels = models[1].levels
+  check('等级 id', r.resolveLevel('high', levels)?.id, 'high')
+  check('★ 等级名字（大写印的那个）', r.resolveLevel('High', levels)?.id, 'high')
+  check('★ 全大写也认（手机键盘免责）', r.resolveLevel('HIGH', levels)?.id, 'high')
+  check('空串 undefined', r.resolveLevel('', levels), undefined)
+  check('★ 不做部分匹配（猜错会悄悄改变它想多深）', r.resolveLevel('h', levels), undefined)
+  check('★ 不存在的中文等级名不认（等级名字就是列表里印的那些）', r.resolveLevel('高', levels), undefined)
+  check('★ 模型没发布的等级不认', r.resolveLevel('max', levels.slice(0, 3)), undefined)
+
+  // renderLevels：一个模型自己的等级屏
+  const levelScreen = r.renderLevels(models[1], { provider: 'deepseek-account', model: 'deepseek-chat' }, levels)
+  check('等级屏标题', levelScreen.startsWith('DeepSeek Reasoner 的推理等级：'), true)
+  check('★ 别的模型上标的是默认值', levelScreen.includes('High（默认）'), true)
+  check('等级屏给出下一步', levelScreen.includes('回复 /model 等级 off 切换。'), true)
 
   // 路由端到端：/model 无参 = 列出；有参 = 切换；宿主拒绝 = 如实说失败
   const calls = []
@@ -247,6 +760,88 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('★ 失败文案带上宿主给的原因', refused.text.includes('Select an available model'), true)
   check('★ 失败文案给出下一步', refused.text.includes('/model'), true)
 
+  // ---- 推理等级：四条契约（列出 / 只改等级 / 同时改 / 失败不静默）----
+  const levelCalls = []
+  /** 记下 selectModel 的四个参数，并像宿主那样把等级归一化后回传。 */
+  const levelRouter = (current, overrides = {}) =>
+    makeRouter({
+      currentModel: async () => current,
+      selectModel: async (sessionId, provider, model, reasoningEffort) => {
+        levelCalls.push([sessionId, provider, model, reasoningEffort])
+        const option = models.find((row) => row.provider === provider && row.model === model)
+        const effort = reasoningEffort ?? option?.defaultLevel
+        return { provider, model, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+      },
+      ...overrides,
+    }).router
+
+  /*
+   * ① 换模型时**默认等级随选择一起交下去**。
+   * 不交的话，"用哪个等级"就交给了一个用户看不见的解析步骤；而交下去的值，用户能在清单里看到。
+   */
+  levelCalls.length = 0
+  const switchedWithLevel = await routeWith(levelRouter({ provider: 'deepseek-account', model: 'deepseek-chat' }), '/model 2')
+  check('★ 换模型时带上模型自己声明的默认等级', JSON.stringify(levelCalls), JSON.stringify([['session-aaaaaaaa-1111', 'deepseek-account', 'deepseek-reasoner', 'high']]))
+  check('★ 确认文案报出生效的等级', switchedWithLevel.text.includes('推理等级：High'), true)
+  check('★ 确认文案仍然说明"对下一步生效"', switchedWithLevel.text.includes('对下一步生效'), true)
+  // 反向对照：模型没有等级时**不带**这个参数（写个 undefined 进去会让"没指名"变成一件事）
+  levelCalls.length = 0
+  await routeWith(levelRouter({ provider: 'deepseek-account', model: 'deepseek-reasoner' }), '/model 1')
+  check('★ 反向对照：没有等级的模型不传 reasoningEffort', JSON.stringify(levelCalls), JSON.stringify([['session-aaaaaaaa-1111', 'deepseek-account', 'deepseek-chat', undefined]]))
+
+  // ② 只改等级：模型不动
+  levelCalls.length = 0
+  const onlyLevel = await routeWith(
+    levelRouter({ provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' }),
+    '/model 等级 low',
+  )
+  check('★「/model 等级 low」只改等级（模型仍是同一个）', JSON.stringify(levelCalls), JSON.stringify([['session-aaaaaaaa-1111', 'deepseek-account', 'deepseek-reasoner', 'low']]))
+  check('★ 只改等级时说的是"等级切到"，不是"切换模型"', onlyLevel.text.startsWith('已把「QQ」的推理等级切到 Low（DeepSeek Reasoner）。'), true)
+  check('只改等级也说明对下一步生效', onlyLevel.text.includes('对下一步生效'), true)
+
+  // ③ 同时改：模型 + 等级
+  levelCalls.length = 0
+  const both = await routeWith(levelRouter({ provider: 'deepseek-account', model: 'deepseek-chat' }), '/model 2 等级 low')
+  check('★「/model 2 等级 low」两个一起改', JSON.stringify(levelCalls), JSON.stringify([['session-aaaaaaaa-1111', 'deepseek-account', 'deepseek-reasoner', 'low']]))
+  check('★ 两个都改时按"切换模型"报告，并报出等级', both.text.includes('已切换模型：deepseek-account/deepseek-reasoner') && both.text.includes('推理等级：Low'), true)
+
+  // ④ 只问等级（不带等级值）：什么都不改
+  levelCalls.length = 0
+  const asked = await routeWith(levelRouter({ provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' }), '/model 等级')
+  check('★「/model 等级」= 报出这个模型的等级，不切换', levelCalls.length, 0)
+  check('★ 报出等级并标出生效的那个', asked.text.includes('Off · Low · High（当前） · Max'), true)
+
+  // ⑤ 失败必须说出来 —— 三条不同的失败，三种不同的话
+  levelCalls.length = 0
+  const unknownLevel = await routeWith(
+    levelRouter({ provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' }),
+    '/model 等级 高',
+  )
+  check('★ 认不出的等级不切换', levelCalls.length, 0)
+  check('★ 认不出的等级以「找不到这个等级」开门见山', unknownLevel.text.startsWith('找不到这个等级「高」'), true)
+  check('★ 并把合法取值整份印出来（那是用户猜不出来的东西）', unknownLevel.text.includes('Off、Low、High、Max'), true)
+
+  levelCalls.length = 0
+  const noLevels = await routeWith(levelRouter({ provider: 'deepseek-account', model: 'deepseek-chat' }), '/model 等级 high')
+  check('★ 模型没有等级时明说，而不是"切成功了"', JSON.stringify([levelCalls.length, noLevels.text.startsWith('当前模型不支持推理等级')]), JSON.stringify([0, true]))
+
+  levelCalls.length = 0
+  const levelRefused = await routeWith(
+    levelRouter(
+      { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+      {
+        selectModel: async () => {
+          throw new Error('DeepSeek does not support reasoning effort "max"')
+        },
+      },
+    ),
+    '/model 等级 max',
+  )
+  check('★ 宿主拒绝换等级时如实说失败（绝不回一句"已切换"）', levelRefused.text.startsWith('切换推理等级没有成功'), true)
+  check('★ 失败文案带上宿主给的原因', levelRefused.text.includes('does not support reasoning effort'), true)
+  check('★ 失败的等级切换文案里没有"已把…切到"', levelRefused.text.includes('已把'), false)
+
+  // 没有对话时不能凭空调等级（等级的归属也是会话）
   // 没有对话时不能凭空调模型（模型的归属是会话）
   const noBinding = new r.SessionRouter({
     gateway: { ensureSession: async () => {}, prompt: async () => {}, listSessions: async () => [], listOwnSessions: async () => [], cancel: async () => {}, listModels: async () => models },
@@ -255,6 +850,8 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   })
   const orphan = await routeWith(noBinding, '/model')
   check('★ 没有对话时 /model 不硬造一个会话', orphan.text.includes('当前没有对话'), true)
+  const orphanLevel = await routeWith(noBinding, '/model 等级 high')
+  check('★ 没有对话时 /model 等级 不硬造一个会话', orphanLevel.text.includes('当前模型不支持推理等级'), true)
 }
 
 // ---- 会话索引：目录编码是实测出来的精确字符串 ------------------------------
@@ -334,8 +931,17 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('描述要求不要复述结果', def.description.includes('do not repeat that outcome'), true)
   // 模型：列清单与切换同用一个 action，靠有没有 target 区分；只读的那半边不必先确认。
   check('★ target 描述说明 model 可以省略（省略=列出）', def.parameters.properties.target.description.includes('omit it to list the models'), true)
-  check('★ 只读的模型列表被列进"不必先确认"的例外', def.description.includes('action "model" without'), true)
+  check('★ 只读的模型列表被列进"不必先确认"的例外', def.description.includes('action "model" with'), true)
   check('★ 描述说明切换对下一步生效、不是对正在跑的那一步', def.description.includes('applies from the next step'), true)
+  // 推理等级：与 `/model 等级` 同一件事，所以走同一个 action，只多一个参数。
+  check('★ 工具多了 level 参数', def.parameters.properties.level.type, 'string')
+  check('★ level 描述说明要与清单印的名字一致', def.parameters.properties.level.description.includes('as the model list prints it'), true)
+  check('★ level 描述说明"有 target 就一起改、没有就只改等级"', def.parameters.properties.level.description.includes('the model and the level change together'), true)
+  check('★ 描述里说清了模型清单带推理等级', def.description.includes('Each model is listed with its reasoning levels'), true)
+  check('level 不是必填', JSON.stringify(def.parameters.required), JSON.stringify(['action']))
+  // 清单分两层：agent 必须说得出它刚展示的是"本工作区的会话"还是"工作区本身"。
+  check('★ 描述说明清单分两层（list 是会话，all 是会话夹）', def.description.includes('The list has two levels'), true)
+  check('★ 描述说明两层都每屏十条、编号跨屏连续', def.description.includes('numbering that runs on across pages'), true)
 
   check('新建确认文案（有标题）', st.switchConfirmation('new', '测试会话'), '已新建对话「测试会话」，从现在起你的消息发到这里。')
   check('新建确认文案（无标题）', st.switchConfirmation('new', ''), '已新建对话，从现在起你的消息发到这里。')
@@ -352,11 +958,22 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     { sessionId: 'session-aaaaaaaa-1111', title: '修复登录', updatedAt: 1791628347908 },
     { sessionId: 'session-bbbbbbbb-2222', title: '', updatedAt: 1791628347908 },
   ]
-  const viaRouter = sample.map((s, i) => rt.renderSessionRow(s, i, 'session-aaaaaaaa-1111')).join('\n\n')
-  const viaTool = st.renderTable(sample, 'session-aaaaaaaa-1111')
+  // 时间显式注入，免得两条断言跨过一分钟边界时看到两个"x 分钟前"。
+  const NOW = 1_791_628_400_000
+  const viaRouter = sample.map((s, i) => rt.renderSessionRow(s, i, 'session-aaaaaaaa-1111', NOW)).join('\n')
+  const viaTool = st.renderTable(sample, 'session-aaaaaaaa-1111', NOW)
   check('★ 工具渲染与 /list 渲染逐字一致', viaTool, viaRouter)
   check('空标题渲染为 (无标题)', viaTool.includes('(无标题)'), true)
   check('当前会话被标出', viaTool.includes('← 当前'), true)
+  check('★ 一行一条会话（十条要装进一条消息）', viaTool.split('\n').length, 2)
+  check('★ 每一行都以短 id 收尾', viaTool.split('\n').every((line) => /\s[0-9a-f]{6}$/.test(line)), true)
+  // 编号取行自己带的那个：会话清单分两层、每屏十条，第二屏从 11 起。
+  const offsetRows = sample.map((s, i) => ({ ...s, index: 11 + i }))
+  const viaToolOffset = st.renderTable(offsetRows, '', NOW)
+  check('★ 工具用的就是用户看到的编号（第二屏从 11 起）', viaToolOffset.startsWith('11. 修复登录') && viaToolOffset.includes('\n12. '), true)
+  const viaRouterOffset = offsetRows.map((s, i) => rt.renderSessionRow(s, 10 + i, '', NOW)).join('\n')
+  check('★ 带偏移时两者仍然逐字一致', viaToolOffset, viaRouterOffset)
+  check('★ 工具版与 router 版的短 id 规则一致（都是 6 位）', [viaTool.includes('aaaaaa'), rt.shortId('session-aaaaaaaa-1111')].join(','), 'true,aaaaaa')
 }
 
 // ---- 出站文件与主动推送两个工具 --------------------------------------------
@@ -450,6 +1067,28 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
   check('quotedText 直接调用', p.quotedText({ refMsgIdx: 'R1', msgElements: [{ msg_idx: 'R1', content: '原文' }] }), '原文')
   check('quotedText 无输入时 undefined', p.quotedText({}), undefined)
+
+  /*
+   * ★ 引用与正文拆开：没有这一步，"引用一屏清单再回 /switch 3"合成的文本以 `[引用]` 开头，
+   * 路由不认它是指令，整条会落进 agent —— 引用冻结编号这套设计就永远用不上。
+   */
+  const listText = '【QQ 会话】会话（1/2）\n1. 写周报  e716f0'
+  const split = p.splitRouteText({
+    content: '/switch 3',
+    refMsgIdx: 'R1',
+    msgElements: [{ msg_idx: 'R1', content: listText }],
+  })
+  check('★ 拆出来的正文就是那条指令', split.text, '/switch 3')
+  check('★ 引用正文单独交给路由（它靠它认那一屏）', split.quoted, listText)
+  check('★ 交给 agent 的合成文本仍然是"引用在前"的原样', split.composed, `[引用] ${listText}\n/switch 3`)
+  check('★ 于是"以 / 开头才是指令"这条判定不再被引用破坏', split.text.startsWith('/'), true)
+  // 只引用、没写正文：正文是空串，但整条消息不能因此丢掉
+  const quotedOnly = p.splitRouteText({ refMsgIdx: 'R1', msgElements: [{ msg_idx: 'R1', content: '被引的原文' }] })
+  check('★ 只引用不写正文时正文是空串', quotedOnly.text, '')
+  check('★ 但合成文本仍然是那句引用（消息不该消失）', quotedOnly.composed, '[引用] 被引的原文')
+  // 没有引用时两者完全一致（旧行为一个字不变）
+  const plain = p.splitRouteText({ content: '你好' })
+  check('没有引用时拆与不拆同形', JSON.stringify([plain.text, plain.composed, 'quoted' in plain]), JSON.stringify(['你好', '你好', false]))
 }
 
 // ---- 设置页后端：快照、施加、以及工具重注册 --------------------------------
@@ -697,7 +1336,20 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
               name: 'DeepSeek',
               models: [
                 { id: 'deepseek-chat', name: 'DeepSeek Chat' },
-                { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+                {
+                  id: 'deepseek-reasoner',
+                  name: 'DeepSeek Reasoner',
+                  // 与 `dsh-llm-deepseek` 发布的一模一样：id 是小写，名字是首字母大写。
+                  reasoning: {
+                    efforts: [
+                      { id: 'off', name: 'Off' },
+                      { id: 'low', name: 'Low' },
+                      { id: 'high', name: 'High' },
+                      { id: 'max', name: 'Max' },
+                    ],
+                    defaultEffort: 'high',
+                  },
+                },
                 { id: 'deepseek-broken', name: 'DeepSeek Broken' },
               ],
             },
@@ -710,7 +1362,16 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
           if (request.model === 'deepseek-broken') {
             throw new Error('Select an available model before sending a message.')
           }
-          return { selected: { provider: request.provider, model: request.model } }
+          // 宿主会把等级归一化后回传（`commands.js` 的 `resolveCallConfig`），这里照做。
+          return {
+            selected: {
+              provider: request.provider,
+              model: request.model,
+              ...(request.reasoningEffort === undefined
+                ? {}
+                : { reasoningEffort: request.reasoningEffort }),
+            },
+          }
         },
       },
     }
@@ -729,6 +1390,19 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
       JSON.stringify(['deepseek-account/deepseek-chat', 'deepseek-account/deepseek-reasoner', 'deepseek-account/deepseek-broken']),
     )
     check('展平时保留了显示名与 provider 名', `${catalogRows[0].name}|${catalogRows[0].providerName}`, 'DeepSeek Chat|DeepSeek')
+    /*
+     * 等级的来源是目录里那个 `reasoning`（`buildModelCatalog` 从
+     * `resolveModelInfo` 里取的 `efforts` / `defaultEffort`）。
+     * 它必须被展平带出来，否则 `/model` 的清单里就没有"这个模型能想多深"。
+     */
+    check('★ 目录里的 reasoning 被展平成 levels', JSON.stringify(catalogRows[1].levels), JSON.stringify([
+      { id: 'off', name: 'Off' },
+      { id: 'low', name: 'Low' },
+      { id: 'high', name: 'High' },
+      { id: 'max', name: 'Max' },
+    ]))
+    check('★ 默认等级也被带出来（清单用它标"（当前）"）', catalogRows[1].defaultLevel, 'high')
+    check('★ 没有 reasoning 的模型不带 levels（不是空数组）', JSON.stringify(['levels' in catalogRows[0], 'levels' in catalogRows[2]]), JSON.stringify([false, false]))
 
     // 当前模型有两个来源：会话投影优先，请求头兜底
     const headerOnly = { requestHeader: () => ({ config: { provider: 'deepseek-account', model: 'deepseek-chat' } }) }
@@ -782,16 +1456,61 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
     const toolSwitch = await modelRuntime.controlSession('session-header', 'model', '2')
     check(
-      '★ 工具 model <编号> 与 /model <编号> 打的是同一个目标',
+      '★ 工具 model <编号> 与 /model <编号> 打的是同一个目标，且带上模型自己的默认等级',
       JSON.stringify(modelSelects.at(-1)),
-      JSON.stringify({ sessionId: 'session-header', provider: 'deepseek-account', model: 'deepseek-reasoner' }),
+      JSON.stringify({
+        sessionId: 'session-header',
+        provider: 'deepseek-account',
+        model: 'deepseek-reasoner',
+        reasoningEffort: 'high',
+      }),
     )
     check('工具 model 切换成功', toolSwitch.ok, true)
     check('★ 工具 model 告诉 agent 不要重复切换结果', toolSwitch.detail.includes('不要重复'), true)
 
+    // 反向对照：换到一个**没有等级**的模型时不带这个参数
+    modelSelects.length = 0
+    await modelRuntime.controlSession('session-header', 'model', '1')
+    check('★ 反向对照：没有等级的模型不传 reasoningEffort', JSON.stringify(modelSelects.at(-1)), JSON.stringify({ sessionId: 'session-header', provider: 'deepseek-account', model: 'deepseek-chat' }))
+
+    /*
+     * 等级那半边：与 `/model 等级 …` 是同一句话，只是从 agent 嘴里说出来。
+     * 先把这个会话"正在用"的模型换成带等级的那个——"只改等级"改的就是它的等级。
+     */
+    projections.set(headerOnly, {
+      lastUsed: null,
+      pending: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+    })
+
+    // 等级那半边：与 `/model 等级 …` 是同一句话，只是从 agent 嘴里说出来
+    modelSelects.length = 0
+    const toolLevel = await modelRuntime.controlSession('session-header', 'model', '2', 'low')
+    check(
+      '★ 工具 model + level = `/model 2 等级 low`',
+      JSON.stringify(modelSelects.at(-1)),
+      JSON.stringify({ sessionId: 'session-header', provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'low' }),
+    )
+    check('工具换等级成功', toolLevel.ok, true)
+    check('★ 工具报告"不要重复"（这句话用户已经直接收到了）', toolLevel.detail.includes('不要重复'), true)
+
+    modelSelects.length = 0
+    const toolLevelOnly = await modelRuntime.controlSession('session-header', 'model', undefined, 'high')
+    check(
+      '★ 只给 level（没有 target）= 只改当前模型的等级',
+      JSON.stringify(modelSelects.at(-1)),
+      JSON.stringify({ sessionId: 'session-header', provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' }),
+    )
+    check('只改等级的工具结果也是成功', toolLevelOnly.ok, true)
+
+    modelSelects.length = 0
+    const toolLevelBad = await modelRuntime.controlSession('session-header', 'model', undefined, '高')
+    check('★ 认不出的等级：工具报 ok:false（失败不静默）', toolLevelBad.ok, false)
+    check('★ 认不出的等级一个都没切', modelSelects.length, 0)
+    check('★ 认不出的等级文案里给出合法取值', toolLevelBad.detail.includes('Off、Low、High、Max'), true)
+
     const toolModelMissing = await modelRuntime.controlSession('session-header', 'model', '不存在的模型')
     check('★ 工具 model 找不到目标时 ok:false（agent 据此闭嘴）', toolModelMissing.ok, false)
-    check('★ 找不到时不切换', modelSelects.length, 1)
+    check('★ 找不到的一次都没切', modelSelects.length, 0)
 
     const toolModelRefused = await modelRuntime.controlSession('session-header', 'model', '3')
     check('★ 宿主拒绝时工具也报 ok:false（失败不静默）', toolModelRefused.ok, false)
@@ -799,6 +1518,51 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
     const toolUnbound = await modelRuntime.controlSession('session-not-bound', 'model', undefined)
     check('★ 未绑定对话的会话不能操作模型', toolUnbound.ok, false)
+
+    /*
+     * ---- 工具侧要来的清单：真的从**存储**里读一遍 ----
+     *
+     * 上面那些清单都是假宿主的。这一节把会话**真写进磁盘**（索引条目 + 会话目录），
+     * 让 `session-index` → 网关 → 路由 → 工具的整条线跑一次：
+     * agent 拿到的那份表必须与用户看到的编号一致（会话清单现在分两层、每屏十条）。
+     */
+    {
+      const { mkdirSync: mkdirSeed, writeFileSync: writeSeed, utimesSync } = await import('node:fs')
+      const si = await import('../lib/session-index.js')
+      /** 造一条"存储里真的有"的会话；`at` 决定排序（mtime 就是清单用的时间）。 */
+      const seedSession = (id, cwd, title, at) => {
+        const sessionDir = join(dir, 'sessions', si.encodeWorkspaceDir(cwd), id)
+        mkdirSeed(sessionDir, { recursive: true })
+        const log = join(sessionDir, 'log.jsonl')
+        writeSeed(log, '{}\n', 'utf8')
+        utimesSync(log, new Date(at), new Date(at))
+        const indexDir = join(dir, 'storages', 'session_projcache', 'sessions')
+        mkdirSeed(indexDir, { recursive: true })
+        writeSeed(
+          join(indexDir, `${id}.json`),
+          JSON.stringify({ record: { rows: { title: { val: title } }, identity: { cwd } } }),
+          'utf8',
+        )
+      }
+      const SELF_WS = join(dir, 'ws-model')
+      const OTHER_WS = join(dir, '项目甲')
+      seedSession('session-111111-aaaa', SELF_WS, '修登录', 5_000)
+      seedSession('session-222222-bbbb', SELF_WS, '写周报', 4_000)
+      seedSession('session-333333-cccc', OTHER_WS, '别人家的对话', 3_000)
+
+      const stored = await modelRuntime.controlSession('session-header', 'list')
+      check('★ 工具 list 从存储里读到了本工作区的会话', stored.sessions.length, 2)
+      check('★ agent 拿到的编号就是用户看到的编号（从 1 起）', JSON.stringify(stored.sessions.map((row) => row.index)), JSON.stringify([1, 2]))
+      check('★ agent 拿到的行带标题', stored.sessions[0].title, '修登录')
+      check('★ agent 拿到的行带行尾那个 6 位 id 可用的 id', stored.sessions[0].sessionId, 'session-111111-aaaa')
+      check('★ 其它工作区只报数量与名字（不塞进本工作区的清单）', JSON.stringify([stored.otherWorkspaces, stored.otherNames]), JSON.stringify([1, ['项目甲']]))
+      check('★ 工具 list 告诉 agent 不要复述这份清单', stored.detail.includes('不要重复'), true)
+
+      const storedAll = await modelRuntime.controlSession('session-header', 'list', 'all')
+      check('★ 工具 list all 走的是**会话夹**那一层（夹子不是会话）', JSON.stringify(storedAll.sessions), JSON.stringify([]))
+      check('工具 list all 仍然成功', storedAll.ok, true)
+      check('★ list all 不再报"其余在别处"（全都在这儿了）', JSON.stringify([storedAll.otherWorkspaces, storedAll.otherNames]), JSON.stringify([0, []]))
+    }
 
     // 缺服务时的降级：列清单回落为空、切换抛出（好让路由回一句失败而不是静默）
     const noModelCtx = { get: () => undefined }
@@ -1237,7 +2001,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     const after = await store.read()
     check('★ 第二次写入没有抹掉 accounts', Object.keys(after.accounts).length, 1)
     check('★ 第二次写入保留了 bindings', Object.keys(after.bindings).length, 1)
-    check('两个字段都在同一份文件里', JSON.stringify(Object.keys(after).sort()), JSON.stringify(['accounts', 'autoStart', 'bindings', 'pendingNotifications', 'settings', 'version']))
+    check('两个字段都在同一份文件里', JSON.stringify(Object.keys(after).sort()), JSON.stringify(['accounts', 'autoStart', 'bindings', 'browsing', 'pendingNotifications', 'sessionLists', 'settings', 'version']))
 
     // 换一个实例读同一个文件，确认真的落盘了（而不是内存里的假象）。
     const reopened = await new StateStore(file).read()
@@ -1255,6 +2019,33 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     ])
     const concurrent = await store.read()
     check('★ 并发写不丢数据', Object.keys(concurrent.accounts).length, 3)
+
+    /*
+     * 浏览位置与编号清单也必须真的落盘：前者是「查看其余」唯一的记录，
+     * 后者是"引用一屏清单再回编号"唯一的记录。两者丢了都只表现为"编号指到了别处"，
+     * 而那是最难从症状倒推到原因的一种失败。
+     */
+    await store.update((next) => {
+      next.browsing['111:peer'] = { level: 'sessions', workspace: '', page: 2, at: 1 }
+      next.sessionLists['111:peer'] = [
+        { text: '【QQ 会话】会话（1/2）\n1. 写周报', sessions: [{ sessionId: 's-1', title: '周报' }], first: 11, at: 1 },
+      ]
+    })
+    const routeState = await new StateStore(file).read()
+    check('★ 浏览位置落盘并能读回', JSON.stringify(routeState.browsing['111:peer']), JSON.stringify({ level: 'sessions', workspace: '', page: 2, at: 1 }))
+    check('★ 编号清单落盘并能读回（连起始编号一起）', JSON.stringify(routeState.sessionLists['111:peer']), JSON.stringify([{ text: '【QQ 会话】会话（1/2）\n1. 写周报', sessions: [{ sessionId: 's-1', title: '周报' }], first: 11, at: 1 }]))
+
+    // 坏值必须被丢在门外：这两样东西决定"用户回的那个数字指到哪一行"
+    await store.update((next) => {
+      next.browsing['bad-level'] = { level: '不存在的层', workspace: '', page: 1, at: 1 }
+      next.browsing['bad-page'] = { level: 'sessions', workspace: '', page: 'x', at: 1 }
+      next.sessionLists['bad-row'] = [{ text: 'x', sessions: [{ sessionId: '' }], first: 1, at: 1 }]
+    })
+    const filtered = await new StateStore(file).read()
+    check('★ 坏的浏览位置被丢掉（层名只认 folders/sessions）', 'bad-level' in filtered.browsing, false)
+    check('★ 坏的浏览位置被丢掉（页号必须是数字）', 'bad-page' in filtered.browsing, false)
+    check('★ 好的那条还在', '111:peer' in filtered.browsing, true)
+    check('★ 一行 id 都没有的编号清单被丢掉', 'bad-row' in filtered.sessionLists, false)
 
     // 损坏文件：应留档并从空状态继续，且上报。
     const { writeFileSync } = await import('node:fs')

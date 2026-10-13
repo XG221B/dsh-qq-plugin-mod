@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 跨插件"共享资源"冲突检查。
  *
  * 有两类东西在 DSH 里是**所有插件共用**的，而任何一份插件各自的测试都发现不了冲突
@@ -213,35 +213,45 @@ if (mine !== undefined) {
 
 // ---- 4. 自检：这个检查器抓得住已知的那次故障吗 ----
 //
-// 一个永远通过的检查器毫无价值。所以这里把 dsh-qq-plugin 的 IIFE 拆掉，
-// 复原成出错时的样子，再拼一次——**必须**解析失败。
-// 抓不住就说明判定逻辑坏了，而不是"没问题"。
-console.log('\n=== 自检：能否抓住已知故障（拆掉 IIFE 后必须失败）===')
+// 一个永远通过的检查器毫无价值，所以必须证明它能抓住那一类故障。
+//
+// ⚠️ 这里曾经用**真实文件**做样本：把 dsh-qq-plugin 的 IIFE 拆掉，指望它与
+// dsh-wechat-plugin 泄漏的 `PREFIX` 撞车。**这个前提失效了**——微信 0.43.1 的
+// `fix: make the client bundle safe to evaluate again after a rebuild` 把它自己也包了起来，
+// 于是两边都不泄漏，没有东西可撞，自检从此**恒红**。
+//
+// 一个恒红的检查器和一个恒绿的检查器同样有害：它会训练人忽略它。
+// 所以自检改成用**自造样本**，不再依赖任何一个真实插件的内部结构：
+// 别人怎么演进都不会让这段失效，而它检验的东西（顶层 const 撞车会不会解析失败）
+// 恰恰是这个检查器赖以成立的前提。
+console.log('\n=== 自检：能否抓住已知故障（顶层 const 撞车）===')
 let selfTestOk = false
-if (mine === undefined) {
-  console.log('  跳过（没有 dsh-qq-plugin 入口）')
-} else {
-  const stripped = mine.source
-    .replace(/\n\s*;?\(\(\)\s*=>\s*\{\s*\n/, '\n')
-    .replace(/\n\/\/ Closes the IIFE[\s\S]*?\n\}\)\(\)\s*$/, '\n')
-  const anyStripped = stripped !== mine.source
-  if (!anyStripped) {
-    console.log('  ⚠ 没能拆掉 IIFE（包装形式变了？），自检无法执行')
-  } else {
-    const probe = plugins.map((p) => (p === mine ? `// ---- ${p.bundle} （拆掉 IIFE）----\n${stripped}` : p.source)).join('\n')
-    let probeError
+{
+  const bare = 'const PREFIX = "a";\nfunction reportFailure() {}\n'
+  const wrapped =
+    ';(() => {\n' + 'const PREFIX = "b";\nfunction reportFailure() {}\n' + '})()\n'
+  const parseFails = (source) => {
     try {
       // eslint-disable-next-line no-new-func
-      new Function(probe)
-    } catch (error) {
-      probeError = error
+      new Function(source)
+      return false
+    } catch {
+      return true
     }
-    if (probeError !== undefined) {
-      console.log(`  拆掉 IIFE 后如预期失败 ✓  —— ${probeError.message}`)
-      selfTestOk = true
-    } else {
-      console.log('  ✗ 拆掉 IIFE 后仍然解析通过 —— 说明本检查器抓不住跨插件顶层冲突，判定不可信')
-    }
+  }
+
+  // 方向一：两个都裸露 → **必须**解析失败（这就是 POSTMORTEM 004 的形态）
+  const collide = parseFails(bare + bare)
+  // 方向二：其中一个包了 IIFE → 必须相安无事（否则检查器会把正常情况误报成故障）
+  const protectedOk = !parseFails('// ---- p1 ----\n' + bare + '// ---- p2 ----\n' + wrapped)
+
+  if (collide && protectedOk) {
+    console.log('  裸露的顶层 const 撞车 → 解析失败 ✓')
+    console.log('  其中一方包进 IIFE → 相安无事 ✓')
+    selfTestOk = true
+  } else {
+    console.log(`  ✗ 自检失败：撞车被检出=${String(collide)}（应为 true），IIFE 能防护=${String(protectedOk)}（应为 true）`)
+    console.log('    说明本检查器的判定前提不成立，结论不可信')
   }
 }
 
@@ -320,7 +330,9 @@ if (toolCount === 0) {
 
 const failed =
   parseError !== undefined ||
-  (mine !== undefined && !selfTestOk) ||
+  // 自检用自造样本，与"有没有装 QQ 插件"无关，所以不再加 `mine !== undefined` 前提——
+  // 少了它，一个没有 QQ 插件的 profile 会让检查器跳过唯一证明自己可信的那一步。
+  !selfTestOk ||
   toolClashes.length > 0 ||
   toolCount === 0
 console.log(

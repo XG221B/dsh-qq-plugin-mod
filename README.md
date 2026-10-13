@@ -137,9 +137,17 @@ Type these to control which DSH conversation you are talking to:
 | Command | What it does |
 |---|---|
 | `/new [title]` | Start a fresh conversation. Anything after it becomes the title: `/new 修复登录` starts a conversation called 「修复登录」 |
-| `/list` | Conversations in the QQ workspace, newest first |
-| `/list all` | Every conversation, including other workspaces |
-| `/switch <n>` | Move to number `n` in that list. A full session id, the short id `/list` prints, or an exact title work too |
+| `/list` | Go straight to this workspace's conversations (ten per screen) |
+| `/list all` | List the **session folders** (workspaces) on this machine, one per line with its conversation count; reply with a number or a name to enter |
+| `/switch 3` | Move to the 3rd row **of that screen** |
+| `/switch e716f0` | Move by the **short id at the end of the row** — unrelated to numbering, and it never expires |
+| Reply 「查看其余」 | Walk down ten rows (both levels, all the way to the end). Numbering runs on across screens (1–10, then 11–20) |
+| Reply `3`, a name, or a trailing id | No need to type `/switch` while the list is on screen |
+| Quote a list message → `/switch 3` | Numbered by **that screen**; the numbering is frozen inside that message |
+| `/model` | Which models there are, and each one's **reasoning levels**, with the one in use marked |
+| `/model 2` | Switch to the 2nd one; a model name works too |
+| `/model 等级 high` | Change the reasoning level of the current model (the level names are the ones the list prints) |
+| `/model 2 等级 high` | Change the model and the level together |
 | `/current` | Which conversation you are in |
 | `/cancel` | Stop the task that is running |
 | `/help` | This list |
@@ -147,6 +155,23 @@ Type these to control which DSH conversation you are talking to:
 **Spaces are optional**: `/switch3`, `/switch 3` and `/switch:3` all work — these commands get typed
 on a phone keyboard, where a dropped space is normal. A word that merely *starts* with a command is
 not one, so `/news` is not `/new`.
+
+**Numbering expires**: sessions run while you are reading the list, so by the time you reply "3" the
+3rd row may be someone else. Every row therefore ends with a short id of **at most 6 characters** —
+reply with that, or **quote that screen's list message** and the number is read as that message
+printed it.
+
+**The list has two levels, ten rows per screen**: `/list` opens this workspace's conversations;
+`/list all` lists the **session folders** (workspaces), which you enter by number or name. Both
+levels walk down ten rows with 「查看其余」, and **numbering runs on across screens**. When you reach
+the end it says so instead of inviting you to keep going. **Entering a folder only moves where you
+are browsing, not which conversation you are bound to** — to actually switch you still pick a
+conversation inside it.
+
+> **Reasoning levels come from the host adapter.** The bundled DeepSeek adapter publishes
+> `off` / `low` / `high` / `max` (printed as `Off` / `Low` / `High` / `Max`), and those are the names
+> `/model 等级` accepts, case-insensitively. There is no separate Chinese spelling — the level names
+> are the ones the list prints, exactly as the WeChat channel does it.
 
 **Plain language works too** — "switch to the other one", "what conversations do I have", "stop".
 The agent judges the intent rather than matching fixed rules, and a switch tells you whether it
@@ -158,7 +183,7 @@ succeeded or failed.
 |---|---|
 | `send_to_qq` | Send a file from this machine to **the conversation that asked**. Images arrive as photos, videos as playable clips, everything else as a file attachment |
 | `notify_qq` | Push to your current QQ conversation from **any session**. This is what "tell me when it is done" is built on |
-| `qq_session_control` | Look at, switch, create or interrupt conversations |
+| `qq_session_control` | Look at, switch, create or interrupt conversations; list (or switch) models and their reasoning levels |
 
 > The `qq_` / `_qq` in those names is deliberate: **tool names are unique across the whole host
 > scope**, and the WeChat plugin already occupies `session_control`. Two plugins claiming the same
