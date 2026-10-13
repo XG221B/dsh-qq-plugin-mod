@@ -61,7 +61,7 @@ package name, a Git URL, a tarball, or a local path.
 dsh-qq-plugin
 ```
 
-Add a version if you need one: `dsh-qq-plugin@1.0.1`.
+Add a version if you need one: `dsh-qq-plugin@1.0.2`.
 </details>
 
 <details>
@@ -80,7 +80,7 @@ declares is `dsh-qq-plugin`.
 
 ```bash
 npm pack
-# → dsh-qq-plugin-1.0.1.tgz
+# → dsh-qq-plugin-1.0.2.tgz
 ```
 
 Paste the absolute path to that `.tgz` into **添加插件**.
