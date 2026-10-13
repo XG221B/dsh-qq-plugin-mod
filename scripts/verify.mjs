@@ -867,7 +867,32 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('反斜杠与正斜杠等价', si.isSameWorkspace('C:\\a\\b', 'C:/a/b'), true)
   check('尾部斜杠不影响', si.isSameWorkspace('C:\\a\\b\\', 'C:\\a\\b'), true)
   check('不同目录不相等', si.isSameWorkspace('C:\\a\\b', 'C:\\a\\c'), false)
-  check('Windows 忽略大小写', si.isSameWorkspace('C:\\A\\B', 'c:\\a\\b'), true)
+  /*
+   * ★ 大小写归一**是平台的函数**，不是一件常真的事：`lib/session-index.js` 的
+   * `CASE_INSENSITIVE_PATHS` 就是 `process.platform === 'win32' || 'darwin'`。
+   *
+   * 这一条原来只写 `si.isSameWorkspace('C:\\A\\B', 'c:\\a\\b')` 并期望 `true`——那等于把
+   * "跑测试的这台机器是 Windows"当成了前提，在 Linux 上必然变红（CI run `38380657508`
+   * 就是这样挂在第 6 步的，而且它是那一轮**唯一**一条红的）。
+   *
+   * 现在把三件事放进同一条里钉住：显式 `true` 归一、显式 `false` 不归一、
+   * 以及**不给第三个参数时取的就是本平台的文件系统语义**。
+   *
+   * ⚠️ 期望值从 `process.platform` **自己写一遍**，不从被测的那个常数抄一份：
+   * 抄一份的话，"把常数改成恒 `true`"这种回归会和期望一起移动，这条断言就抓不住它
+   * （在 Linux 上把 `/A/B` 与 `/a/b` 当成同一个目录是真的会出事的）。
+   */
+  const caseInsensitiveHere = process.platform === 'win32' || process.platform === 'darwin'
+  check(
+    '★ 大小写归一只按平台：显式 true 归一、显式 false 不归一、不给参数时按本平台的文件系统语义',
+    JSON.stringify([
+      si.isSameWorkspace('C:\\A\\B', 'c:\\a\\b', true),
+      si.isSameWorkspace('C:\\A\\B', 'c:\\a\\b', false),
+      si.isSameWorkspace('C:\\A\\B', 'c:\\a\\b'),
+      si.CASE_INSENSITIVE_PATHS,
+    ]),
+    JSON.stringify([true, false, caseInsensitiveHere, caseInsensitiveHere]),
+  )
   check('★ Linux 不忽略大小写', si.isSameWorkspace('/A/B', '/a/b', false), false)
 }
 
@@ -2933,7 +2958,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
 // ---- 会话文件夹路径校验（坏路径只能"没生效"，不能"起不来"）----------------
 {
-  const { mkdtempSync, rmSync, existsSync } = await import('node:fs')
+  const { mkdtempSync, rmSync, existsSync, writeFileSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
   const p = await import('../lib/paths.js')
@@ -2958,8 +2983,21 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ 被接受时不标记回落', accepted.fellBack, false)
     check('★ 目录真的被建出来了', existsSync(custom), true)
 
-    // 不可用的绝对路径（Windows 上不存在的盘符）
-    const bad = p.resolveWorkspaceDir(dir, 'Z:\\不存在的盘\\QQ')
+    /*
+     * 不可用的**绝对**路径。
+     *
+     * ⚠️ 这里原来写的是 `'Z:\\不存在的盘\\QQ'`（注释说是"Windows 上不存在的盘符"）。
+     * 那个字面量在 Linux 上 `path.isAbsolute()` 是 **false**，于是这条断言在 Linux 上
+     * 走的是"不是绝对路径"那条分支——名字里那个"绝对"从来没被验过。
+     * 也就是说它在本机绿、在 Linux 也绿，而绿的**不是同一件事**：一条恒绿的检查。
+     *
+     * 本机双平台实测（见工具探针）：那个字面量 Windows 上抛 `ENOENT`、Linux 上抛 `EACCES`；
+     * 而"拿一个普通文件当路径分量"两边都抛 `ENOTDIR`，且 `isAbsolute` 两边都为真。
+     * 所以夹具换成后者：同一个契约（绝对但不可用 → 回落、不抛），两种平台下都真的走到那一步。
+     */
+    const blocker = join(dir, 'blocker')
+    writeFileSync(blocker, 'not a directory', 'utf8')
+    const bad = p.resolveWorkspaceDir(dir, join(blocker, 'QQ'))
     check('★ 不可用的绝对路径被拒并回落', bad.fellBack, true)
     check('★ 不可用时值仍然可用（不抛）', bad.path, fallback)
     check('回落时给出理由', typeof bad.reason, 'string')
