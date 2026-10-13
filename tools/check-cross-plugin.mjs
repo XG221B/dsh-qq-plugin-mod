@@ -45,6 +45,13 @@
  * node tools/check-cross-plugin.mjs <profileDir> <额外 client.js…>
  * ```
  *
+ * `<profileDir>` 省略时取 `~/.dsh/profiles/desktop`——由 `node:os` 的 `homedir()`
+ * 拼出来，Windows 上就是 `C:\Users\<你>\.dsh\profiles\desktop`。
+ *
+ * ⚠️ **不要把它写死成某个盘符。** 这里曾经写死 `C:\Users\XCISXC\…`：本机跑得通，
+ * 而任何别的机器（以及 Linux）会指到一个不存在的地方，于是这个检查器在读 profile 的
+ * `package.json` 时抛**未捕获的 ENOENT**——一个只在开发这台机器上成立的本地检查器。
+ *
  * 官方插件的客户端入口在 `app.asar` 里（`…/<pkg>/lib/client.js`），
  * 所以要覆盖它们，先用 `qq-plugin/tools/asar-extract-fixed.mjs`（**留在应用侧，
  * 没有随本检查器一起搬进 `dsh-qq/tools/`**）导出，再当作额外文件传进来：
@@ -55,11 +62,67 @@
  * ```
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-const profileDir = process.argv[2] ?? 'C:\\Users\\XCISXC\\.dsh\\profiles\\desktop'
+/**
+ * 默认的 profile 目录：`~/.dsh/profiles/desktop`。
+ *
+ * 由 `homedir()` 拼出来，而不是写死盘符——见文件头那段。
+ *
+ * @param home - 家目录，可注入以便自检。
+ */
+function defaultProfileDir(home = homedir()) {
+  return join(home, '.dsh', 'profiles', 'desktop')
+}
+
+/**
+ * 这条断言的样子：`dir` 是不是 `home` 这台机器上的 `~/.dsh/profiles/desktop`。
+ *
+ * 单独抽成一个函数只为一件事：让下面的自检能把它喂给一个**假的** home。
+ * 一条永远不会失败的断言等于没有断言。
+ */
+function isDefaultProfileDir(dir, home) {
+  return dir === join(home, '.dsh', 'profiles', 'desktop')
+}
+
+const DEFAULT_PROFILE_DIR = defaultProfileDir()
+/** 显式给了就以它为准；没给才用默认值。 */
+const profileDir = process.argv[2] ?? DEFAULT_PROFILE_DIR
 /** 额外的 client.js 路径（通常是从 asar 里导出的官方插件）。 */
 const extraFiles = process.argv.slice(3)
+
+// ---- 自检：默认目录确实来自 homedir()（含反向对照）----
+//
+// 这一段的三个方向都要成立才算数：
+//   1. 默认值等于 `homedir()` 拼出来的那个路径；
+//   2. **换一个假的 home，同一条断言必须不成立**——否则它只是恒真的装饰；
+//   3. 这次故障本身的写法（写死盘符）必须被同一条断言抓住。
+const homeSelfTestOk = (() => {
+  const home = homedir()
+  const fakeHome = join(home, '__not-this-home__')
+  const fromHomedir = isDefaultProfileDir(DEFAULT_PROFILE_DIR, home)
+  const fakeHomeRejected = !isDefaultProfileDir(DEFAULT_PROFILE_DIR, fakeHome)
+  const hardCodedRejected = !isDefaultProfileDir('C:\\Users\\XCISXC\\.dsh\\profiles\\desktop', fakeHome)
+
+  console.log('=== 自检：默认 profile 目录来自 homedir() ===')
+  console.log(`  默认值：${DEFAULT_PROFILE_DIR}`)
+  console.log(`  homedir() = ${home}`)
+  console.log(`  它等于 homedir()/.dsh/profiles/desktop：${fromHomedir ? '是 ✓' : '否 ✗'}`)
+  console.log(
+    `  反向对照：换一个假 home，这条断言不成立：${fakeHomeRejected ? '是 ✓' : '否 ✗（断言恒真，没有意义）'}`,
+  )
+  console.log(
+    `  反向对照：写死盘符的老写法被这条断言判失败：${hardCodedRejected ? '是 ✓' : '否 ✗（它抓不住这次故障）'}`,
+  )
+  if (!fromHomedir || !fakeHomeRejected || !hardCodedRejected) {
+    console.log('  ✗ 自检失败：默认目录不再由 homedir() 决定，结论不可信')
+  } else {
+    console.log('  自检通过 ✓')
+  }
+  console.log('')
+  return fromHomedir && fakeHomeRejected && hardCodedRejected
+})()
 
 /**
  * 取某个包声明的客户端入口。
@@ -126,7 +189,16 @@ function topLevelNames(source) {
   return names
 }
 
-const profileManifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+const profileManifestPath = join(profileDir, 'package.json')
+if (!existsSync(profileManifestPath)) {
+  // 说的是"读不到哪一个"，而不是把未捕获的 ENOENT 栈丢出来：
+  // 这个检查器是给人手动跑的，人需要知道的是换哪个目录。
+  console.log(`✗ 读不到 ${profileManifestPath}`)
+  console.log('  它应当是一个 DSH profile 目录，默认取 ~/.dsh/profiles/desktop。')
+  console.log('  换一个：node tools/check-cross-plugin.mjs <profileDir>')
+  process.exit(1)
+}
+const profileManifest = JSON.parse(readFileSync(profileManifestPath, 'utf8'))
 const bundles = profileManifest.dsh?.profile?.bundles ?? []
 console.log(`profile: ${profileDir}`)
 console.log(`已启用 bundle ${bundles.length} 个\n`)
@@ -329,6 +401,7 @@ if (toolCount === 0) {
 }
 
 const failed =
+  !homeSelfTestOk ||
   parseError !== undefined ||
   // 自检用自造样本，与"有没有装 QQ 插件"无关，所以不再加 `mine !== undefined` 前提——
   // 少了它，一个没有 QQ 插件的 profile 会让检查器跳过唯一证明自己可信的那一步。

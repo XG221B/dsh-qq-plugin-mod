@@ -1619,10 +1619,16 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('workspaceLabel 处理正斜杠', st.workspaceLabel('/home/me/work'), 'work')
 
   // ★ 一致性断言：工具版渲染与 router 版渲染必须逐字相同。
-  // 为避免 router 与工具互相依赖，两处各有一份实现，所以必须靠断言钉住。
+  // 时间与短 id 那两段是两份手抄的实现（标题不抄：工具直接用 router 的 `truncateTitle`），
+  // 所以必须靠断言钉住。下面的样本里带着**会分叉的那几种标题**：
+  // 只比短标题的话，"工具只 trim、router 还压空白并裁到 24 字"这一处差别一直看不出来。
+  const longSampleTitle = '这是一句很长的标题'.repeat(4)
   const sample = [
     { sessionId: 'session-aaaaaaaa-1111', title: '修复登录', updatedAt: 1791628347908 },
     { sessionId: 'session-bbbbbbbb-2222', title: '', updatedAt: 1791628347908 },
+    { sessionId: 'session-cccccccc-3333', title: longSampleTitle, updatedAt: 1791628347908 },
+    { sessionId: 'session-dddddddd-4444', title: '第一行\n第二行', updatedAt: 1791628347908 },
+    { sessionId: 'session-eeeeeeee-5555', title: '甲\t\t乙   丙', updatedAt: 1791628347908 },
   ]
   // 时间显式注入，免得两条断言跨过一分钟边界时看到两个"x 分钟前"。
   const NOW = 1_791_628_400_000
@@ -1631,7 +1637,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('★ 工具渲染与 /list 渲染逐字一致', viaTool, viaRouter)
   check('空标题渲染为 (无标题)', viaTool.includes('(无标题)'), true)
   check('当前会话被标出', viaTool.includes('← 当前'), true)
-  check('★ 一行一条会话（十条要装进一条消息）', viaTool.split('\n').length, 2)
+  check('★ 一行一条会话（十条要装进一条消息；标题里的换行不许多占一行）', viaTool.split('\n').length, 5)
   check('★ 每一行都以短 id 收尾', viaTool.split('\n').every((line) => /\s[0-9a-f]{6}$/.test(line)), true)
   // 编号取行自己带的那个：会话清单分两层、每屏十条，第二屏从 11 起。
   const offsetRows = sample.map((s, i) => ({ ...s, index: 11 + i }))
