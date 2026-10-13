@@ -18,20 +18,37 @@ machinery unnecessary — see [Differences from the WeChat version](#differences
 
 [中文说明](README.zh.md)
 
+<img src="docs/images/cover-chat.jpg" width="320" alt="A QQ chat: the message 「把我电脑上桌面那张 DSH 自画像发过来」 (send me that DSH self-portrait from my desktop), then the file arrives in the chat as an image, followed by 「已发送 ✅ 桌面上的「DSH 自画像.png」（29 KB，PNG）」 (sent — DSH 自画像.png on the desktop, 29 KB, PNG)">
+
+> **Ask for a file in one sentence and it lands on your phone.** Say *"send me that DSH self-portrait
+> from my desktop"* in QQ and the agent finds the file on the computer, sends it back, and confirms
+> with *"sent — DSH 自画像.png on the desktop (29 KB, PNG)"*. The **＋** at the right of the composer
+> is the attachment entry: images, videos, voice and files all go in that way
+> (see [Media in both directions](#media-in-both-directions-images-video-voice-files)).
+
 ## Features
 
 - **Text both ways.** A QQ message becomes a DSH prompt, and the reply comes back to QQ.
 - **Images, files and voice in; images, videos and files out.** Attachments are saved into the
   session workspace and handed to the agent; the agent sends files back with `send_to_qq`.
+  **A reply that runs long is turned into a `.md` file** and sent to your phone instead of being cut.
 - **One QQ chat, many DSH conversations.** `/new`, `/list`, `/switch`, `/current`, `/cancel` — or
-  just say "switch to the other one".
-- **Answer permission prompts and questions from your phone.** Approvals and multiple-choice
-  questions are delivered to QQ and answered by replying, so being away from the desk does not stall
-  the agent.
+  just say "switch to the other one". The list has **session folders** and **sessions** as two levels.
+- **Pick the model and the reasoning level from your phone too.** `/model` lists the models with
+  each one's reasoning levels; `/model 2` and `/model 等级 high` switch them, effective from the
+  **next** step.
+- **Answer permission prompts and questions from your phone.** Approvals are answered with
+  「允许」/「拒绝」 (allow/deny) or a numbered option; the agent's multiple-choice questions arrive in
+  QQ with numbered options and a digit answers them — being away from the desk does not stall the task.
 - **Proactive push.** `notify_qq` lets any session on this machine message you — that is what makes
   "tell me when it is done" work. It works in practice: a ten-message burst was delivered in full,
-  and the last six of those went out as proactive pushes.
-- **Settings page** under **Settings → QQ**.
+  and the last six of those went out as proactive pushes. (Tencent's rules for unsolicited sends can
+  change and **the plugin assumes no quota**; anything undelivered is queued and flushed the next
+  time you speak.)
+- **Scheduled tasks.** Run through the DSH host's own `schedule_create` / `schedule_list` /
+  `schedule_delete` / `schedule_update` — just say "wake me at 23:12". The plugin does not
+  reimplement what DSH already has; it is only the channel.
+- **Settings page** under **Settings → QQ** — nine settings, a native folder picker, and diagnostics.
 
 ## Install
 
@@ -53,6 +70,12 @@ package name, a Git URL, a tarball, or a local path.
 > The repository and the package share one name, so there is nothing to reconcile — but the
 > `-plugin` suffix is easy to drop by accident. **Copy `dsh-qq-plugin` rather than typing it.** The
 > install command has to match the package name exactly.
+
+From a terminal, that is one line (`--profile web` works just as well if that is the profile you use):
+
+```bash
+dsh plugin --profile desktop add dsh-qq-plugin
+```
 
 <details open>
 <summary><b>From npm</b> — nothing to configure</summary>
@@ -121,9 +144,28 @@ Wait for the install to finish, click **立即启用** (enable now), and restart
 After restarting DSH, open **Settings → QQ** and click **开始扫码** (start the QR bind). Scan the
 code with mobile QQ and confirm on the phone.
 
+**The scan is the whole registration.** The bot application is created by that scan, so you
+**do not need to register anything on Tencent's open platform first and you do not need an
+AppID/AppSecret in advance** — nor a public IP or a reverse proxy.
+
 The credentials land straight in **DSH's credential store** — the plugin's own state file records
 only the AppID, never the AppSecret. The channel connects by itself once bound: send any message to
 the bot in QQ and you should get a reply.
+
+<img src="docs/images/locked-screen-work.jpg" width="320" alt="A QQ chat on a phone: at 22:38 the agent reports that the 13-poem autumn anthology is ready and sends a docx and a pdf; at 22:43 the user asks 「告诉我，我现在电脑时间」 (tell me the computer's current time) and the agent answers 2026-10-13 22:43:28 Tuesday, then asks whether to set a reminder or a scheduled task">
+
+That is what it looks like **in real use, after installing it**: the agent put together a 13-poem
+anthology on the computer and sent both the `docx` and the `pdf` straight to the phone; in the same
+conversation, *"tell me the computer's current time"* came back as `2026-10-13 22:43:28 Tuesday`,
+along with an offer to set a reminder.
+
+**The computer was locked at that moment** — the phone says 22:43 and so does the lock screen:
+
+<img src="docs/images/locked-screen-desktop.jpg" width="720" alt="The computer's lock screen at the same 22:43: a city-at-night wallpaper with only the time 22:43 and the date 10月13日，星期二 across it, no taskbar and no windows visible">
+
+Locking the screen does not stop the agent, so it keeps working after you walk away while the
+conversation on your phone carries on. The reverse is also true: **locking is exactly what you
+should do when you leave** (see [Security](#security)).
 
 ## Usage
 
@@ -132,6 +174,49 @@ Just send a message and it reaches the agent:
 ```
 你好
 ```
+
+What follows is grouped by capability, and each group carries a **real screenshot** showing what it
+looks like and what it proves.
+
+### Conversation management, from your phone
+
+One QQ chat sits in front of any number of DSH conversations. `/list` opens this **workspace's**
+conversations, ten per screen:
+
+<img src="docs/images/session-list.jpg" width="320" alt="Replying /list in QQ: the agent answers with an 【QQ 会话】会话 (1/1) list of ten rows, every row ending in a six-character id, row 1 marked with ← 当前 (current), and a footer saying there are another 89 conversations in other session folders, plus 「回复编号或行尾 6 位 id 切换。引用这条消息再回编号，可以避免编号过期。」">
+
+One shot, four things proved: **ten rows per screen**, a **six-character id at the end of every row**
+(`7cee80`, `4b55e1`…), the current conversation marked **← 当前**, and that footer line. The list also
+tells you there are **89 more conversations in the other session folders**.
+
+`/list all` is **the level above — the session folders** (across projects and workspaces), each with
+its conversation count; reply with a number or a name to enter one, and what you get is that
+folder's conversation list (the screenshot replies `1`, so it enters 「QQ 会话」):
+
+<img src="docs/images/session-folders.jpg" width="320" alt="Replying /list all in QQ: the agent answers with a 会话夹 (1/1) list — QQ 会话 11 个会话, workplace 62, dsh_wechat 21, texttry 1, dsh_orb 1, browser-sessions 3 — footer 「回复编号或名字进入。」; the user then replies 1 and the agent sends the 【QQ 会话】 conversation list">
+
+**Entering a folder only moves where you are browsing, not which conversation you are bound to** —
+to actually switch you still pick a conversation inside it.
+
+**A bare digit *is* `/switch <digit>`**: with the list on screen there is no need to type `/switch`,
+just reply `2` — and it **tells you which one you landed on**, short id included, so you can check it
+against the row you meant:
+
+<img src="docs/images/switch-session.jpg" width="320" alt="With the conversation list on screen the user replies with a bare 2, and the agent answers 「已切换到「你好」。4b55e1」 (switched to 「你好」, 4b55e1)">
+
+★ **Quoting freezes the numbering**: long-press **the list message** and quote it before replying
+with a number, and the number is read as **that screen** printed it. Sessions running while you read
+cannot make you land on the wrong one — the numbering is frozen inside that message. The list footer
+says so itself: 「引用这条消息再回编号，可以避免编号过期。」
+
+**Plain language works too.** Here the user sends 「查看所有会话」 (show all conversations) — not a
+command:
+
+<img src="docs/images/natural-language.jpg" width="320" alt="Having earlier replied 2 to switch, the user now sends the plain-language 「查看所有会话」; instead of an error the agent sends the session-folder list plus 「已列出，请看上面的会话列表。回复对应编号即可切换，回复「查看其余」看下一页。」">
+
+The agent judges **intent** rather than matching fixed rules: it recognised "list conversations",
+listed the session folders, and told you that a number switches and 「查看其余」 turns the page.
+A switch also reports whether it succeeded or failed.
 
 Type these to control which DSH conversation you are talking to:
 
@@ -169,14 +254,127 @@ the end it says so instead of inviting you to keep going. **Entering a folder on
 are browsing, not which conversation you are bound to** — to actually switch you still pick a
 conversation inside it.
 
+### Models and reasoning levels
+
+`/model` lists which models there are (marked 「（当前）」/「（默认）」 — current / default) and each
+one's reasoning levels. `/model <name|number>` switches model; `/model 等级 high` changes only the
+reasoning level; `/model 2 等级 high` changes both. **A switch takes effect from the next step.**
+
 > **Reasoning levels come from the host adapter.** The bundled DeepSeek adapter publishes
 > `off` / `low` / `high` / `max` (printed as `Off` / `Low` / `High` / `Max`), and those are the names
 > `/model 等级` accepts, case-insensitively. There is no separate Chinese spelling — the level names
 > are the ones the list prints, exactly as the WeChat channel does it.
 
-**Plain language works too** — "switch to the other one", "what conversations do I have", "stop".
+**Plain language works here too** — "switch to the other one", "what conversations do I have", "stop".
 The agent judges the intent rather than matching fixed rules, and a switch tells you whether it
 succeeded or failed.
+
+### Media in both directions: images, video, voice, files
+
+**In:** send the agent an **image / video / voice message / file** from your phone. **Voice is
+transcribed server-side** and you never see that step. Document attachments (Word, Excel) are
+readable too.
+
+Here is a photo of a dog sent in, with a single question — "what is this":
+
+<img src="docs/images/read-image.jpg" width="320" alt="The user sends a photo of a small dog into the QQ chat and asks only 「这是什么」 (what is this); the agent answers 「一只小狗的照片 🐶」 and lists the white long coat with a tuft of black on the head and ears looking like a border-collie mix, the big eyes staring at the lens with a very innocent expression, the pale tiled floor with a yellow-bodied orange-beaked duck toy, and notes that the photo is sideways because the phone was held the wrong way round">
+
+What is worth noticing is not that it recognised a dog but the two details **only someone who really
+looked at the image could give**: the yellow-bodied orange-beaked duck toy, the person's legs at the
+left edge of the frame, and its unprompted remark that **the photo is sideways** (the phone was held
+the wrong way round).
+
+Now a PDF sent in, again with a single question — "what is this":
+
+<img src="docs/images/receive-file.jpg" width="320" alt="The user sends 「视觉组预训练文档.pdf」 (387.89KB) into the QQ chat and asks 「这是什么？」; the agent answers that it is a vision-group pre-training / recruitment task document from the Zhuyan team dated September 2026, five pages, exported from MarkText, and summarises it under three headings: environment setup, AI plus engineering discipline, and four traditional OpenCV tasks">
+
+**Document attachments are read too**: it says this is a five-page recruitment task document,
+exported from MarkText, and summarises it as "Part 1 environment setup / Part 2 using AI plus
+engineering discipline / Part 3 traditional OpenCV, four tasks".
+
+**Out:** the agent sends files from this computer to your phone with `send_to_qq` — **images arrive
+as photos, videos as playable clips**, everything else as a file attachment:
+
+<img src="docs/images/send-image.jpg" width="320" alt="The user says 「把我电脑上桌面那张 DSH 自画像发过来」 in QQ; the agent first replies with the filename 「桌面上的 DSH 自画像.png」, then the image itself appears in the chat, and finally it confirms 「已发送 ✅ 桌面上的「DSH 自画像.png」（29 KB，PNG）。」">
+
+This is the story the cover image at the top of the page tells, and it is a complete **pickup**:
+say which file you mean, the agent finds it on the computer and sends it back, and it **confirms with
+the filename and size** so you can see at a glance whether it sent the one you meant.
+
+★ **A reply that runs long is turned into a `.md` file** and sent to your phone (4000 characters by
+default, adjustable; `0` = no limit):
+
+<img src="docs/images/long-reply-file.jpg" width="320" alt="The user says 「把这个 QQ 插件项目 read me 完整读一遍，写一份详细的中文导读」; the agent replies 「dsh-qq-plugin README 中文导读（完整版）」 with a 20.33KB .md attachment and adds that it read the whole 377-line README and sent the guide as a **.md file** because it is easier to read on a phone than a long message">
+
+Something that would not fit on one phone screen is far more usable as a file — **not truncated**,
+and not split into a dozen messages that flood the chat. The threshold is the settings page's
+"单条回复字数上限" (per-reply character limit).
+
+**Voice**: hold to talk on the phone and the agent receives text (**transcribed server-side**, with
+nothing extra for you to do):
+
+<img src="docs/images/voice-message.jpg" width="320" alt="A three-second voice bubble in the QQ chat, immediately followed by the agent giving tonight's and tomorrow's Beijing weather: tonight clear 8°C, sunset 17:39; tomorrow cloudy with a high of 21°C, sunrise 6:22, plus a warning that the temperature has dropped sharply and the cold index is very high, and a note about Indonesian haze and PSI levels">
+
+Under that 3-second voice bubble in the screenshot is a complete weather answer — **the middle step,
+turning speech into text, is invisible on your phone**, and does not need to be visible.
+
+### Interaction
+
+These three have **no screenshots** — they are a question and an answer inside the same conversation,
+so a picture of one would look much like the ones above; prose says it better. This is what arrives
+on your phone:
+
+- **Permission approvals**: when the agent wants to touch your files, a pending request appears in
+  QQ saying what it intends to do. Reply **「允许」** (allow), **「拒绝」** (deny), or a **numbered
+  option** — all three answer it, and the task carries on. (For such a prompt to appear at all, the
+  permission preset has to be one of the two that can show prompts — see [Settings](#settings).)
+- **Either/or and multiple-choice questions**: the agent's question arrives **with numbered options**,
+  and a single digit answers it.
+- **Quoting as context**: long-press and quote one of its answers before speaking — for example
+  "**expand the second point** in this one" — and it knows which answer "this one" is and which point
+  "the second" is.
+
+### Proactivity: tell me when it is done
+
+★★ **`notify_qq`**: **any session** on this machine can push a message to you — that is what "tell me
+when it is done" is built on. On the left is the **desktop** session doing the work; on the right is
+what arrives on **mobile QQ**:
+
+<img src="docs/images/push-desktop.png" width="720" alt="The DSH desktop app: the user asked 「从网上找几篇写秋天的诗歌，写完发我 qq」 (find a few autumn poems online and send them to my QQ when done); the session shows 「已完成，用时 3 分 24 秒」 (done, took 3m24s), the answer explains it searched public web pages, checked each poem and compiled them into a file which it sent to QQ as DOCX and PDF, and below is a table of the 13 poems with number, work and author">
+
+<img src="docs/images/push-qq.jpg" width="320" alt="The same result on mobile QQ: first 「秋天的诗给你整理好了：13 首（唐宋诗词·元曲·清词·济慈《秋颂》），每首附一句品读，来源逐首核对过。文件：秋日诗歌选.docx」, then the docx and pdf attachments, with a line in between explaining that a PDF version was added so it can be opened directly on the phone, with source links on the last page">
+
+**Note that the two sides are not the same session**: the work was done by that desktop session, and
+the message arrived in the QQ conversation you are bound to. That is exactly why
+`allowCrossSessionNotify` is on by default — without it, the session doing the work could not report
+its own result.
+
+**It works in practice**: a ten-message burst was delivered in full, and **the last six of those went
+out as proactive pushes**. (Tencent's rules for unsolicited sends can change and **the plugin assumes
+no quota**; anything undelivered is queued and flushed the next time you speak.)
+
+**Scheduled tasks** run through the DSH host's own `schedule_create / schedule_list /
+schedule_delete / schedule_update` — the plugin does not reimplement what DSH already has, it is only
+the channel. Plain language is enough:
+
+<img src="docs/images/schedule-1.jpg" width="720" alt="In the QQ chat the user says 「我去眯一会儿，23:12 叫我」 (I'm going to doze off, wake me at 23:12); the agent answers 「好，定好了 ⏰ **23:12** 喊你（后台定时已启动）。眯着吧，到点我发 QQ 消息叫你 😴」 (done, set for 23:12, the timer is running in the background; doze off, I'll message you on QQ when it is time)">
+
+When the time comes it really does push one over (this is a **proactive push**, not you asking):
+
+<img src="docs/images/schedule-2.jpg" width="720" alt="A QQ notification on the phone's lock screen: the app icon next to the name Deepseek, reading 「⏰ 23:12 到点了，该起了！」 (it is 23:12, time to get up), with 23:12 in the status bar">
+
+"Remind me every morning at 9 what I have to do today", "send me the current time every hour",
+"show me which scheduled tasks I have" all belong here. *Showing* them is `schedule_list`, and so are
+deleting and changing them.
+
+### Reliability
+
+- **A session that is archived or disappears is re-bound automatically**, with a line telling you so
+  rather than the message being swallowed: the old conversation was archived → a new one is created
+  to carry on, and you are notified.
+- State writes on Windows have **retries and backoff** (for the "file is in use" kind of EPERM).
+- Inbound messages with empty content or an unknown frame type **leave a log line** instead of leaving
+  no trace at all.
 
 ### Tools the agent can use
 
@@ -189,6 +387,11 @@ succeeded or failed.
 > The `qq_` / `_qq` in those names is deliberate: **tool names are unique across the whole host
 > scope**, and the WeChat plugin already occupies `session_control`. Two plugins claiming the same
 > name means whichever registers second fails silently.
+
+**Those three come from the plugin.** Scheduling is not among them because it does not need the
+plugin to implement anything: it runs through the DSH host's own `schedule_create` /
+`schedule_list` / `schedule_delete` / `schedule_update`, and the plugin's part is only to carry the
+result over the QQ channel.
 
 ### Settings
 
@@ -204,7 +407,62 @@ succeeded or failed.
   `/switch`, `/current`, `/cancel`, `/model`)
 - **诊断 (Diagnostics)** — log tail, workspace path, conversation count, pending interactions
 
-Nine settings in total:
+This is the page in full (the ones below are the same page section by section):
+
+<img src="docs/images/settings.png" width="620" alt="The 「QQ 遥控」 settings page in full: under the heading it says 「用手机 QQ 遥控这台电脑。扫码绑定一次，之后一直有效。」; top right has 「打开配置文件」 and a close button; the page runs through 「帮助」 (a 使用手册 card with an 打开使用手册 button), 「连接」 (通道状态 toggle, 已绑定账号 1905760478 ← E56C740FF85C1B60D50920D33D5181F3 · 2026-10-10T10:46:05.061Z with an 已连接 tag and a 断开连接 button, then a 扫码绑定 card with a 重新扫码 button) and 「权限」 (QQ 对话的权限预设)">
+
+These are the top two cards — and the first thing you see **after installing it** — 帮助 (Help) and
+连接 (Connection):
+
+<img src="docs/images/settings-a.png" width="620" alt="The top of the QQ 遥控 settings page: under 「帮助」 a 使用手册 card with an 打开使用手册 button; under 「连接」 a 通道状态 toggle, 已绑定账号 showing 1905760478 ← E56C740FF85C1B60D50920D33D5181F3 with 2026-10-10T10:46:05.061Z, an 已连接 green tag and a 断开连接 button, and a 扫码绑定 card with a 重新扫码 button">
+
+**The QR bind** is in the lower half of that shot: click 重新扫码, scan with mobile QQ and confirm on
+the phone. **You do not have to register on Tencent's open platform first**, and you do not need an
+AppID/AppSecret — the bot application is created by that scan. The 已绑定账号 row is what it looks
+like once bound (AppID ← an irreversible fingerprint · bind time), and 已连接 beside it is the
+channel's state right now.
+
+The middle two groups are **permissions** and the **command reference**:
+
+<img src="docs/images/settings-e.png" width="620" alt="The 「权限」 and 「行为」 groups of the settings page: the 「QQ 对话的权限预设」 dropdown is set to 「完全访问：不询问，直接执行」; below it 「行为设置」 has a 「允许其他会话推送到 QQ」 toggle, a 「会话操作先确认」 toggle, 「附件合并窗口（毫秒）」 set to 10000, and a 「等不到文字就自动处理附件」 toggle">
+
+**The permission preset has three Chinese options**, with the default selected in the shot:
+
+| Option | Meaning |
+|---|---|
+| `完全访问：不询问，直接执行` — full access, do not ask | The default. The agent does not ask you — and an ask would go to QQ, where the task then waits for your answer |
+| `自动审核：电脑上判断` — automatic review, judged on the computer | Let the policy on the computer decide; prompts are possible |
+| `跟随 DSH 设置：和桌面端一样` — follow the DSH setting, same as the desktop | Exactly what the desktop does; prompts are possible |
+
+Only the last two **can still send a permission prompt to QQ**. To see for yourself that an approval
+can flow back to a phone, set this to one of the presets that can prompt — a pending request then
+arrives in QQ, and **「允许」/「拒绝」 or a numbered option** answers it.
+
+<img src="docs/images/settings-b.png" width="620" alt="The 「指令」 group of the settings page: a 「斜杠指令」 table listing /help, /new [标题], /list, /switch <编号>, /model [名字], /current, /cancel with their descriptions, footer 「分隔符可用「:」或直接省略，例如 /switch1。」; below it a 「说大白话也可以」 paragraph saying that plain 「换个对话」「看下有哪些对话」「停一下」 all work">
+
+That group is `/help` as the page prints it, and **the user handbook is what every command and
+setting is measured against**. The line underneath — that plain language works too — is also true:
+DSH first says what it is about to do and waits for you to agree; turn off 「会话操作先确认」 above to
+skip that step.
+
+Lower on the page, the behaviour settings and the session folder:
+
+<img src="docs/images/settings-d.png" width="620" alt="The lower half of the settings page: 「单条回复字数上限」 set to 4000 with the note 「超过就作为 .md 文件发送，不截断。填 0 表示不限制。」; 「回复聚合静默窗口（毫秒）」 set to 1200; 「渠道上下文说明」 is a text box reading 「[渠道：QQ] 你在和 QQ 上的用户对话…」; 「会话文件夹路径」 has an input with a 「选择…」 button beside it and 「当前生效：C:\Users\XCISXC\.dsh\dsh_qq」; at the bottom 「保存设置」 and 「恢复默认」">
+
+**The session folder** setting has a **native folder picker** — the 选择… button. The box holds the
+text **you typed** and 当前生效 to its right is the path **actually in use**; keeping the two apart is
+deliberate, so that when a path is wrong you can see what you wrote and change it while still knowing
+which folder is really being used.
+
+Last is the **diagnostics** block, your first clue when something goes wrong:
+
+<img src="docs/images/settings-c.png" width="620" alt="The 「诊断」 group of the settings page: 日志文件 C:\Users\XCISXC\.dsh\qq\boot.log, 会话工作目录 C:\Users\XCISXC\.dsh\dsh_qq, 对话数 1, 待回答交互 0, 被动回复限流 4 次／1 小时; below, 「日志末尾」 is a scrollable log box with lines such as sdk info [qqbot:api] <<< Status: 200 OK and TraceId, ending with send_to_qq: path=…DSH 自画像.png -> 文本已发送；已发送图片 DSH 自画像.png">
+
+Diagnostics gives you **the log path plus the tail of the log**, so most problems you can **see for
+yourself** — whether a send failed, whether you were rate-limited, whether an attachment never
+landed. The last line in the shot happens to be a successful `send_to_qq`.
+
+Adding those cards up, there are nine settings in total:
 
 | Setting | Default | What it does |
 |---|---|---|
