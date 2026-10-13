@@ -50,7 +50,7 @@
 | 12 | `POST /.dsh-qq-plugin/permission-preset` | 下拉改选（**改即提交，没有保存按钮**） | ✅ 已实现 |
 | 13 | `GET /.dsh-qq-plugin/log` | 首次加载 | ✅ 已实现 |
 | 14 | `GET /.dsh-qq-plugin/accounts` | 首次加载 | ✅ 已实现；**客户端「已绑定账号」的主数据源** |
-| 15 | `POST /.dsh-qq-plugin/client-error` | 看门狗 20s 未渲染 / 加载失败 / 登录失败 / 渲染抛错 | ✅ 已实现（失败被客户端吞掉） |
+| 15 | `POST /.dsh-qq-plugin/client-error` | 看门狗 20s 未能注册设置段 / 加载失败 / 登录失败 / 渲染抛错 | ✅ 已实现（失败被客户端吞掉） |
 | — | `POST /.dsh-qq-plugin/toggle`（`{enabled}`） | **客户端不调用** | ✅ 已实现（客户端用 `/start` `/stop` 这一对） |
 | — | `GET /.dsh-qq-plugin/`（裸前缀） | **客户端不调用** | ✅ 已实现（等同 `/status`） |
 | — | `POST /.dsh-qq-plugin/credentials` | **客户端不调用** | ✅ 已实现（保留给手工录入/脚本） |
@@ -410,15 +410,16 @@
 ### 2.14 `POST /.dsh-qq-plugin/client-error` ✅ 已实现
 
 - **请求体**：`{ scope: string, message: string, stack: string }`。
-  `scope` 取值：`'mount'`（20s 看门狗）、`'load'`、`'login'`、`'render'`；`stack` 无栈时为空串。
+  `scope` 取值：`'register'`（20s 看门狗：设置段没能注册进槽位注册表。**旧名 `'mount'` 已废弃**——
+  它描述的是组件挂载，而看门狗从没盯过那一步）、`'load'`、`'login'`、`'save'`、`'directory-picker'`、
+  `'render'`（含 `slots.onEntryError` 报回来的渲染抛错）、`'watchdog'`；`stack` 无栈时为空串。
 - **发送方式**：优先 `navigator.sendBeacon(url, new Blob([payload], {type:'application/json'}))`，
   否则 `fetch(..., { keepalive: true })`。都是 POST + JSON 体，现有 `readJson` 直接可用（它不看 content-type）。
 - **响应形状**：**客户端完全不读**（连失败都吞掉）。现状 `{ ok: true }` 可以。
-- **可选改进（非必需）**：客户端发了 `scope`，而现状只把它丢掉（日志行是 `client-error: <message>`）。
-  微信版的日志行是 `client[<scope>] FAILED: <message>`——把 `scope` 带上，
+- **宿主侧现状（已实现）**：日志行带上 `scope`，形如 `client[<scope>] FAILED: <message>`，
   排查时能立刻区分「渲染抛错」与「看门狗超时」：
   ```js
-  const scope = typeof body.scope === 'string' ? body.scope : 'client'
+  const scope = typeof body.scope === 'string' && body.scope !== '' ? body.scope : 'unknown'
   bootLog(`client[${scope}] FAILED: ${typeof body.message === 'string' ? body.message : '(no message)'}`)
   ```
 
@@ -495,7 +496,7 @@
 | 日志末尾 `pre` | `GET /log.tail`（字符串，取末 60 行） |
 | 「最近错误」卡 + 诊断分组是否出现 | `status.errors` 非空，或 `/log` 成功 |
 | 错误红字行 | 任意一次请求非 2xx 的 `error` |
-| `client-error` 上报 | 20s 看门狗、`load()` 失败、`startLogin()` 失败、渲染抛错 |
+| `client-error` 上报 | 20s 看门狗（设置段未注册）、`load()` 失败、`startLogin()` 失败、`saveSettings()` 失败、选择文件夹失败、渲染抛错 |
 
 ---
 

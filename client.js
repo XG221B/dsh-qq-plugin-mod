@@ -151,23 +151,107 @@ function reportFailure(scope, error) {
   }
 }
 
+/**
+ * Whether a value that was sent is the value that was stored.
+ *
+ * Loose on purpose: the host rounds the numbers and trims the workspace path, so an exact
+ * comparison would call every ordinary save partly ignored. Strings are compared trimmed because
+ * trimming is exactly what the host does to them; a trailing space disappearing is not the user
+ * being lied to.
+ *
+ * @param sent - Value the page sent.
+ * @param stored - Value the host answered with.
+ * @returns True when the host kept the value.
+ */
+function sameSetting(sent, stored) {
+  if (typeof sent === 'number' && typeof stored === 'number') return Math.round(sent) === Math.round(stored)
+  if (typeof sent === 'string' && typeof stored === 'string') return sent.trim() === stored.trim()
+  return sent === stored
+}
+
+/**
+ * The keys of `sent` whose value is not the value `stored` holds.
+ *
+ * @param sent - The patch that was posted.
+ * @param stored - The settings the host holds.
+ * @returns Keys that differ.
+ */
+function changedKeys(sent, stored) {
+  if (!isRecord(sent) || !isRecord(stored)) return []
+  return Object.keys(sent).filter((key) => !sameSetting(sent[key], stored[key]))
+}
+
+/**
+ * The names of the settings the host did not keep.
+ *
+ * `lib/settings.js` drops a field it cannot accept — out of range, wrong type — and keeps the old
+ * value, while the reply carries what is stored. Comparing the two turns that silent drop into
+ * something the user can see, and it covers every field at once rather than the ones somebody
+ * remembered to check. Without it the page prints 已保存 over a value that quietly went back to
+ * what it was, which is how a user comes to believe a setting is in effect when it never was.
+ *
+ * @param sent - The patch that was posted.
+ * @param stored - The settings the host answered with.
+ * @param t - Copy table, for the names shown to the user.
+ * @returns Labels of the fields that did not stick.
+ */
+function ignoredSettings(sent, stored, t) {
+  return changedKeys(sent, stored).map((key) => (typeof t[key] === 'string' ? t[key] : key))
+}
+
+/**
+ * Whether the form holds changes that are not stored yet.
+ *
+ * Every control on the page writes to the draft and none of them saves, and a filled box looks
+ * exactly like a stored value. Saying so is the difference between "it did not work" and "I did not
+ * save it". Only the fields this form owns are compared: `permissionPreset` has a control of its
+ * own that applies on the spot, so it is not part of this form's unsaved state.
+ *
+ * @param state - Page state.
+ * @returns True while the form differs from what is stored.
+ */
+function draftIsDirty(state) {
+  if (!isRecord(state.draft) || !isRecord(state.settings)) return false
+  const draft = {}
+  for (const key of SETTINGS_FIELDS) {
+    if (key in state.draft) draft[key] = state.draft[key]
+  }
+  return changedKeys(draft, state.settings).length > 0
+}
+
 window.__ModuleLoader__.load({
   id: 'dsh-qq-plugin',
   factory: (require) => {
     /**
-     * Whether this plugin's settings section has rendered at least once.
+     * Whether the settings section has been registered with the shell's slot registry.
      *
-     * A bundle can load and register correctly yet still never produce a usable
-     * page. That failure leaves no evidence anywhere, so the watchdog reports it.
+     * This is the watchdog's health signal, and it is deliberately *not* "the page rendered".
+     * The bundle loads at application start (`dsh.client.immediately`), while the component only
+     * mounts when the user opens 设置 → QQ — so on every launch that stays in the conversation
+     * view, "nothing rendered within 20 seconds" was the *normal* state, and the old signal
+     * reported it as a failure once per boot. The old flag lived in the component body, which is
+     * precisely the place that does not run on such a launch; it now moves to the step whose
+     * failure it is supposed to name.
+     *
+     * Registration is a fact worth watching, and it is one this side can prove: it says the
+     * factory ran, `apply` ran, `ctx.slots` existed, and the shell accepted the section — so the
+     * shell renders it whenever that section is opened. It says nothing about *how* that render
+     * goes; `watchSectionRenderErrors` names what is covered and what is not.
      */
-    let mountedOnce = false
+    let sectionRegistered = false
 
-    // Scheduled here rather than at module scope so the timer cannot interfere with
+    // Armed here rather than at module scope so the timer cannot interfere with
     // registration, which happens before any factory runs.
     try {
       setTimeout(() => {
-        if (!mountedOnce) {
-          reportFailure('mount', new Error('插件已加载，但设置页在 20 秒内没有渲染（看门狗触发）'))
+        if (!sectionRegistered) {
+          // Scoped `register`, not `mount`: this line reports the step that failed, and the old
+          // name described a step this watchdog never watched. A stale label misleads exactly the
+          // way a stale success condition does.
+          reportFailure(
+            'register',
+            new Error('插件已加载，但没能把「QQ」设置页注册到 DSH（20 秒看门狗触发）'),
+          )
         }
       }, 20_000)
     } catch {
@@ -208,8 +292,23 @@ window.__ModuleLoader__.load({
         loadFailed: '读取设置失败',
         retry: '重试',
         saveFailed: '保存失败',
+        /*
+         * The names of the settings the host refused, appended to `saveIgnored` when a save leaves
+         * one of them at its old value.
+         */
+        saveIgnored: '这些值没有被主机接受，已改回实际生效的值：',
         settingsTitle: '行为设置',
-        settingsHint: '改完生效，不用重启。',
+        /*
+         * Two facts, and both were missing before.
+         *
+         * The save needs an explicit click and nothing on the page said so, while the old line here
+         * ("改完生效，不用重启") read as "already applied" — which is how a user comes to believe a
+         * value is stored when it was never sent. Every field below *is* live in this plugin
+         * (`runtime.js` reads them per message and `#switchWorkspace` runs on the spot), so the
+         * second half stays; what was missing is the click.
+         */
+        settingsHint: '改完点「保存设置」。这里所有设置都立即生效，不用重启。',
+        settingsDirty: '有改动还没保存。',
         requireConfirmation: '会话操作先确认',
         requireConfirmationHint: '你说「换个对话」这类要求时，DSH 会先说它要做什么，等你同意再执行。',
         allowCrossSessionNotify: '允许其他会话推送到 QQ',
@@ -309,8 +408,10 @@ window.__ModuleLoader__.load({
         loadFailed: 'Could not read the settings',
         retry: 'Retry',
         saveFailed: 'Could not save',
+        saveIgnored: 'The host did not accept these values, so they were put back to what is in effect:',
         settingsTitle: 'Behaviour',
-        settingsHint: 'Applies at once; no restart.',
+        settingsHint: 'Press « Save » after a change. Everything here takes effect at once; no restart.',
+        settingsDirty: 'Changes are not saved yet.',
         requireConfirmation: 'Confirm before acting on a request',
         requireConfirmationHint:
           'When you ask for something like «switch conversation», DSH first says what it will do and waits for you to agree.',
@@ -500,6 +601,8 @@ a.dsh-qq-button { text-decoration: none; }
 .dsh-qq-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 12px 0; }
 .dsh-qq-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
 .dsh-qq-ok { font-size: 12px; line-height: 1.5; color: var(--dsw-alias-state-success-primary); }
+/* The unsaved-changes note: a state of the form, not a failure, so it is not the error colour. */
+.dsh-qq-warn { font-size: 12px; line-height: 1.5; color: var(--dsw-alias-state-warn-primary); }
 .dsh-qq-error { font-size: 12px; line-height: 1.5; color: var(--dsw-alias-state-error-primary); }
 .dsh-qq-errors { margin: 0; padding: 0 0 0 18px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 
@@ -637,12 +740,31 @@ a.dsh-qq-button { text-decoration: none; }
         pickBusy: false,
         /** Copy for a chooser that threw; cleared whenever a new attempt starts. */
         pickError: '',
+        /**
+         * Fields the last save sent but the host did not keep.
+         *
+         * The host drops a value it cannot accept and answers with what is stored, so the page would
+         * otherwise say 已保存 while the field quietly went back to its old value. See
+         * `ignoredSettings`.
+         */
+        ignored: [],
+        /**
+         * The host's own words for a failed save, shown beside the button that started it.
+         *
+         * Kept apart from `error`, which the load and the login paths also write: a save that failed
+         * has to be reported where the user pressed, or the page looks like it worked.
+         */
+        saveError: '',
         verifyCode: '',
       })
 
-      // Tell the watchdog that this page really renders. Setting it here is what
-      // distinguishes "loaded but blank" from a working settings section.
-      mountedOnce = true
+      /*
+       * The watchdog is deliberately **not** signalled here.
+       *
+       * This body runs only when the user opens 设置 → QQ, so a flag set here says "somebody looked
+       * at the page", not "the page is registered". The watchdog's signal is set where the
+       * registration actually happens — see `sectionRegistered` in `apply`.
+       */
 
       // Re-render when the shell changes the page language.
       const [, bump] = React.useState(0)
@@ -683,6 +805,10 @@ a.dsh-qq-button { text-decoration: none; }
             // A reload discards an in-progress edit, which is the honest behaviour: what is shown
             // is what is stored.
             draft: isRecord(settings) && isRecord(settings.settings) ? settings.settings : prev.draft,
+            // The notes about an earlier save describe values this reload has just replaced, so they
+            // go with the draft they were about.
+            ignored: [],
+            saveError: '',
             presets: isRecord(presets) ? presets : prev.presets,
             log: isRecord(log) ? log : prev.log,
             accountRows:
@@ -841,17 +967,23 @@ a.dsh-qq-button { text-decoration: none; }
       /**
        * Wait for a saved settings answer, then fold it back in.
        *
+       * The reply is compared against what was sent, field by field, before the page claims success.
+       * `lib/settings.js` drops a value it cannot accept — out of range, wrong type — and keeps the
+       * old one, so the reply is the only place that drop is visible; without the comparison the page
+       * prints 已保存 over a field that never moved.
+       *
        * A host that omits `settings` in the reply leaves the draft as the truth, which is what the
        * page already showed — the alternative would be to blank the form on a successful save.
        */
       async function saveSettings() {
         if (state.draft === undefined) return
-        setState((prev) => ({ ...prev, busy: true, saved: false, error: '' }))
-        // Only the fields this page owns go back: see SETTINGS_FIELDS.
+        // The patch built below is what the host is asked for; it is kept for the comparison.
         const patch = {}
         for (const key of SETTINGS_FIELDS) {
+          // Only the fields this page owns go back: see SETTINGS_FIELDS.
           if (key in state.draft) patch[key] = state.draft[key]
         }
+        setState((prev) => ({ ...prev, busy: true, saved: false, saveError: '', ignored: [] }))
         try {
           const result = await request(`${PREFIX}/settings`, {
             method: 'POST',
@@ -862,17 +994,25 @@ a.dsh-qq-button { text-decoration: none; }
             ...prev,
             busy: false,
             saved: true,
+            // A save is only reported as a success if every value sent is the value stored. The
+            // host silently drops a field it cannot accept, and 已保存 over a dropped field is how a
+            // user comes to believe a setting is in effect when it never was.
+            ignored: ignoredSettings(patch, saved, t),
             settings: saved,
             draft: saved,
             defaults: isRecord(result) && isRecord(result.defaults) ? result.defaults : prev.defaults,
           }))
-          // The confirmation is transient: it describes one save, not a state of the form.
+          // The confirmation is transient: it describes one save, not a state of the form. Whatever
+          // was ignored is a state and stays on screen.
           setTimeout(() => setState((prev) => ({ ...prev, saved: false })), 2500)
         } catch (error) {
+          // Reported to the host as well as shown: a failing save is exactly the case where a static
+          // page and a stale state file look the same from the outside.
+          reportFailure('save', error)
           setState((prev) => ({
             ...prev,
             busy: false,
-            error: error instanceof Error ? error.message : String(error),
+            saveError: error instanceof Error ? error.message : String(error),
           }))
         }
       }
@@ -988,7 +1128,9 @@ a.dsh-qq-button { text-decoration: none; }
        *   error appears, no state is written. Cancelling must not be destructive.
        * - a **throw** is caught. It must be: an error that escapes a slot component replaces the
        *   whole entry with one `slot entry crashed in 'settings.section'` line and the page is
-       *   gone. The failure is reported to the host log and also shown next to the field.
+       *   gone. The failure is reported to the host log, printed to the console, and also shown
+       *   next to the field — with the host's own words, because "选择文件夹失败" alone cannot tell a
+       *   permission problem from a missing service.
        */
       async function chooseWorkspacePath() {
         const pick = props?.pick
@@ -999,8 +1141,15 @@ a.dsh-qq-button { text-decoration: none; }
           if (typeof chosen === 'string') edit('workspacePath', chosen)
           setState((prev) => ({ ...prev, pickBusy: false }))
         } catch (error) {
+          console.error('dsh-qq: 选择文件夹失败', error)
           reportFailure('directory-picker', error)
-          setState((prev) => ({ ...prev, pickBusy: false, pickError: t.workspacePathPickFailed }))
+          setState((prev) => ({
+            ...prev,
+            pickBusy: false,
+            pickError: `${t.workspacePathPickFailed}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          }))
         }
       }
 
@@ -1545,11 +1694,44 @@ a.dsh-qq-button { text-decoration: none; }
                         type: 'button',
                         className: 'dsh-qq-button dsh-qq-outline',
                         disabled: state.busy || state.defaults === undefined,
-                        onClick: () => setState((prev) => ({ ...prev, draft: prev.defaults })),
+                        // Resetting fills the form from the defaults and saves nothing, so the notes
+                        // an earlier save left are about a draft that no longer exists.
+                        onClick: () =>
+                          setState((prev) => ({ ...prev, draft: prev.defaults, ignored: [] })),
                       },
                       t.settingsReset,
                     ),
                     state.saved ? h('span', { className: 'dsh-qq-ok' }, t.settingsSaved) : null,
+                    /*
+                     * The page is edited without being saved, and a filled box looks exactly like a
+                     * stored value. This is the one thing that tells the two apart — its absence used
+                     * to be read, reasonably, as "already saved".
+                     */
+                    draftIsDirty(state)
+                      ? h('span', { className: 'dsh-qq-warn' }, t.settingsDirty)
+                      : null,
+
+                    /*
+                     * What happened to the save, said next to the button that started it.
+                     *
+                     * A failure and a field the host refused are the two outcomes that used to leave
+                     * the page looking successful: the button showed 已保存 either way. Neither note
+                     * is transient — a save that did not take is a state, not a moment.
+                     */
+                    state.saveError === ''
+                      ? null
+                      : h(
+                          'p',
+                          { className: 'dsh-qq-error', role: 'alert' },
+                          `${t.saveFailed}：${state.saveError}`,
+                        ),
+                    state.ignored.length === 0
+                      ? null
+                      : h(
+                          'p',
+                          { className: 'dsh-qq-error', role: 'alert' },
+                          `${t.saveIgnored}${state.ignored.join('、')}`,
+                        ),
                   ),
                 ),
               )
@@ -1738,8 +1920,8 @@ a.dsh-qq-button { text-decoration: none; }
     function apply(ctx) {
       ctx.effect(() => {
         const removeStyles = installStyles()
-        const disposeSection = ctx.slots.inject('settings.section', () =>
-          ctx.slots.register(
+        const disposeSection = ctx.slots.inject('settings.section', () => {
+          const dispose = ctx.slots.register(
             {
               name: 'settings.section',
               id: 'qq',
@@ -1762,13 +1944,63 @@ a.dsh-qq-button { text-decoration: none; }
               },
             },
             QqSettings,
-          ),
-        )
+          )
+          /*
+           * The health signal, set where it can actually be proved: `slots.inject` runs this
+           * contributor as soon as the shell declares the slot (synchronously, when the declaration
+           * already exists), so reaching this line means the registry took the section and the shell
+           * will render it whenever it is opened.
+           *
+           * A shell that never declares the slot never runs this, and the watchdog reports that —
+           * which is the failure the watchdog exists for. What it must never do again is fire
+           * because the user simply had not opened the settings page yet.
+           */
+          sectionRegistered = true
+          return dispose
+        })
+        const disposeRenderWatch = watchSectionRenderErrors(ctx)
         return () => {
+          if (typeof disposeRenderWatch === 'function') disposeRenderWatch()
           if (typeof disposeSection === 'function') disposeSection()
           removeStyles()
         }
       })
+    }
+
+    /**
+     * Report a crash of this plugin's own settings section, because the watchdog cannot see
+     * rendering.
+     *
+     * Registering a section proves only that the shell accepted it. Rendering is the other half, and
+     * this is the one seam the shell exposes for it: every entry it renders sits inside an error
+     * boundary that reports the crash through `ctx.slots.onEntryError`, filtered here by component
+     * identity so another plugin's section in the same slot is not attributed to us.
+     *
+     * What is covered: a component that *throws* while rendering, at the moment the user opens the
+     * section. What is not, and no signal here claims otherwise: a component that renders without
+     * throwing and still shows nothing usable — a blank or wrong page. That failure has no
+     * observable form from inside this plugin at all.
+     *
+     * Optional on purpose. A shell without the method leaves the watchdog exactly as strong as it
+     * was, and nothing on this path may fail activation: an entry the runtime records as `failed`
+     * makes the shell refuse to start the whole application.
+     *
+     * @param ctx - The client context `apply` received.
+     * @returns The unsubscribe, when the shell offers the channel.
+     */
+    function watchSectionRenderErrors(ctx) {
+      const slots = ctx.slots
+      if (typeof slots?.onEntryError !== 'function') return undefined
+      try {
+        return slots.onEntryError((slotKey, entry, error) => {
+          if (slotKey !== 'settings.section' || entry?.component !== QqSettings) return
+          reportFailure('render', error instanceof Error ? error : new Error(String(error)))
+        })
+      } catch (error) {
+        // Losing the extra coverage must not cost the section, but it is worth a line in the log.
+        reportFailure('watchdog', error instanceof Error ? error : new Error(String(error)))
+        return undefined
+      }
     }
 
     // Returning the exports object directly is the documented factory shape.

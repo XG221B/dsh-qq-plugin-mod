@@ -3375,6 +3375,76 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
         QQBot.prototype.sendText = realSendText
       }
     }
+
+    /*
+     * ---- 4. 设置存档：**旧值和新值都写** -----------------------------------
+     *
+     * 设置页"改了没生效"的两种形态在状态文件里长得一模一样（文件只记"现在存的是什么"）：
+     * 请求根本没发出来，vs 发出来了、主机没收下。只有旧值和新值放在一起才分得开，
+     * 而**只有主机同时知道这两个值**——所以这一节钉住三件事：旧值在、新值在，
+     * 以及被丢弃的字段会把请求里的原始值一并写出来。
+     */
+    {
+      const settingsRuntime = new QqRuntime({ get: () => undefined }, runtimeOptions(join(dir, 'settings-log.json')))
+
+      // ---- 4a. 正常存档：旧值与新值在同一行 ----
+      {
+        const { lines, stop } = startCapture()
+        try {
+          settingsRuntime.applySettings({ settleMs: 999 })
+        } finally {
+          stop()
+        }
+        const saved = lines.filter((line) => line.includes('设置已存档'))
+        check('★ 一次存档留下恰好一行', saved.length, 1)
+        check('★ 旧值在', (saved[0] ?? '').includes('settleMs 1200 ->'), true)
+        check('★ 新值也在（只有一边就分不出"没发出来"和"发了没收下"）', (saved[0] ?? '').includes('-> 999'), true)
+        show('设置已存档那一行', saved[0])
+      }
+
+      // ---- 4b. 值没变也照样记：这正是"发了没收下"留下的形状 ----
+      {
+        const { lines, stop } = startCapture()
+        try {
+          settingsRuntime.applySettings({ settleMs: 999 })
+        } finally {
+          stop()
+        }
+        const saved = lines.filter((line) => line.includes('设置已存档'))
+        check('★ 与原来同值时也记一行（否则"发了没收下"没有任何痕迹）', saved.length, 1)
+        check('★ 那一行两侧同值', (saved[0] ?? '').includes('settleMs 999 -> 999'), true)
+      }
+
+      // ---- 4c. 被丢弃的字段：旧值、新值、请求里的原始值，三样都在 ----
+      {
+        const { lines, stop } = startCapture()
+        try {
+          settingsRuntime.applySettings({ mergeWindowMs: 36_000_000 })
+        } finally {
+          stop()
+        }
+        const saved = lines.filter((line) => line.includes('设置已存档'))
+        check('★ 越界字段仍记一行（主机丢弃了它，而用户该看得见）', saved.length, 1)
+        check('★ 两侧都是旧值（丢弃 = 保持原值，不是回落默认值）', (saved[0] ?? '').includes('mergeWindowMs 10000 -> 10000'), true)
+        check('★ 并点名请求里的原始值（否则还得猜是越界、类型不对，还是压根没发）', (saved[0] ?? '').includes('36000000'), true)
+        check('★ 也写明是被丢弃、保持原值', (saved[0] ?? '').includes('被丢弃'), true)
+        show('被丢弃那一行', saved[0])
+      }
+
+      // ---- 4d. 负向：请求里没有可用字段时，不能假装存了一次 ----
+      {
+        const { lines, stop } = startCapture()
+        try {
+          settingsRuntime.applySettings({ 未知字段: 1 })
+        } finally {
+          stop()
+        }
+        const saved = lines.filter((line) => line.includes('设置已存档'))
+        check('★ 没有可用字段时仍记一行（与"请求根本没到"分得开）', saved.length, 1)
+        check('★ 那一行说清什么也没改', (saved[0] ?? '').includes('什么也没改'), true)
+        check('★ 不该凭空写出一对旧新值', (saved[0] ?? '').includes(' -> '), false)
+      }
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

@@ -1,5 +1,5 @@
-﻿/**
- * Syntax-and-registration check for the QQ settings-page client.
+/**
+ * Syntax, registration-shape and state-flow check for the QQ settings-page client.
  *
  * ## What this verifies — and what it does not
  *
@@ -8,12 +8,22 @@
  * `{ name, inject, apply }` with `inject` exactly `['slots']`, that `apply` runs without throwing
  * against a stubbed context, and that every disposer it hands to `ctx.effect` is callable.
  *
- * It also stubs `navigator.sendBeacon` and fires the captured 20-second watchdog callback, so the
- * client-error reporting path is exercised for real rather than merely parsed.
+ * It verifies the *watchdog*: that a loaded-but-unregistered bundle is still reported, that a
+ * registered section with the settings page never opened is **not** reported (that was the false
+ * positive: the signal used to be set in the component body, which only runs when the user opens
+ * the page), and that the optional `slots.onEntryError` seam is used when the shell offers it and
+ * costs nothing when it does not. `navigator.sendBeacon` is stubbed so each report is observed for
+ * real rather than merely parsed.
  *
- * ⚠️ It is **not** a visual check. Nothing here renders React, lays out CSS, or talks to a live
- * host: the component is never invoked, so no DOM, no stylesheet and no route response is
- * validated. Visual verification is unavailable from this harness and is not claimed.
+ * It verifies the *state flow* of the form (section 8): the component is run against a stand-in
+ * React — state cells, collected effects — and a stand-in `fetch`, and the element tree it returns
+ * is walked as plain objects. That is where the unsaved-changes note, the naming of a field the host
+ * refused, and the difference between a cancelled dialog and a broken one are asserted.
+ *
+ * ⚠️ None of this is a visual check. Nothing is laid out, no CSS is applied, no DOM is built and no
+ * browser or live host is involved: the assertions are about registration shape, state transitions,
+ * copy keys, and the values the page sent against the values the host answered with. Visual
+ * verification is unavailable from this harness and is not claimed.
  *
  * Run: node scripts/verify-client.mjs   (from the dsh-qq package directory)
  */
@@ -164,30 +174,10 @@ equal("inject is exactly ['slots']", exports_?.inject, ['slots'])
 check('apply is a function', typeof exports_?.apply === 'function')
 equal('factory resolved react through the injected require', requested, ['react'])
 
-console.log('\n-- 4. Watchdog --')
+console.log('\n-- 4. Watchdog timer --')
 
 equal('one 20-second watchdog timer was scheduled', timers.map((timer) => timer.delay), [20_000])
-if (typeof timers[0]?.callback === 'function') {
-  try {
-    timers[0].callback()
-  } catch (error) {
-    check('watchdog callback runs without throwing', false, String(error))
-  }
-}
-check('watchdog reported through sendBeacon', beacons.length === 1, `${beacons.length} beacon(s)`)
-equal('report went to PREFIX/client-error', beacons[0]?.url, '/.dsh-qq-plugin/client-error')
-let beaconBody
-try {
-  beaconBody = JSON.parse(await beacons[0]?.blob?.text?.())
-} catch {
-  beaconBody = undefined
-}
-equal('report shape is { scope, message, stack }', Object.keys(beaconBody ?? {}).sort(), [
-  'message',
-  'scope',
-  'stack',
-])
-equal('report scope is mount', beaconBody?.scope, 'mount')
+check('the watchdog callback was captured rather than fired yet', typeof timers[0]?.callback, 'function')
 
 console.log('\n-- 5. apply() against a stubbed context --')
 
@@ -254,6 +244,263 @@ if (typeof ctx.effectDisposer === 'function') {
 }
 equal('disposer released the slot and removed the stylesheet', disposed, ['slot', 'style'])
 
+console.log('\n-- 6. Watchdog health signal = the section was registered, not the page was opened --')
+
+/**
+ * Evaluate a second, independent copy of `client.js` in this same realm.
+ *
+ * The watchdog's flag lives per factory call, so "registered" and "not registered" can only be
+ * compared between two evaluations. `new Function` re-runs the whole script (its own IIFE, its own
+ * flag) without touching the module imported above.
+ *
+ * The stubs are installed around both the evaluation and the factory call, because the timer is
+ * armed inside the factory — and again around `fireWatchdog()`, because `reportFailure` reads
+ * `navigator.sendBeacon` at the moment it reports rather than capturing it.
+ *
+ * @param {object} react - React stand-in handed to the fresh factory.
+ * @returns {{ exports: object, timers: object[], beacons: object[], fireWatchdog: () => void }}
+ */
+function loadFreshClient(react) {
+  const state = { spec: undefined, timers: [], beacons: [] }
+  const withStubs = (run) => {
+    const previousLoad = window.__ModuleLoader__.load
+    const previousTimeout = globalThis.setTimeout
+    const previousBeacon = navigator.sendBeacon
+    window.__ModuleLoader__.load = (value) => {
+      state.spec = value
+    }
+    // Its own 20-second timer would hold the process open; capturing it also lets the test fire it.
+    globalThis.setTimeout = (callback, delay) => {
+      state.timers.push({ callback, delay })
+      return state.timers.length
+    }
+    navigator.sendBeacon = (url, blob) => {
+      state.beacons.push({ url, blob })
+      return true
+    }
+    try {
+      return run()
+    } finally {
+      window.__ModuleLoader__.load = previousLoad
+      globalThis.setTimeout = previousTimeout
+      navigator.sendBeacon = previousBeacon
+    }
+  }
+  const freshExports = withStubs(() => {
+    new Function(source)()
+    return state.spec.factory((id) => {
+      if (id === 'react') return react
+      throw new Error(`unexpected module request: ${id}`)
+    })
+  })
+  return {
+    exports: freshExports,
+    timers: state.timers,
+    beacons: state.beacons,
+    fireWatchdog: () =>
+      withStubs(() => {
+        for (const timer of state.timers) timer.callback?.()
+      }),
+  }
+}
+
+/** A slot registry that exists but whose `settings.section` slot is never declared. */
+function undeclaredSlotContext() {
+  return {
+    effect: (factory) => factory(),
+    slots: {
+      // The shell never declares the slot, so the contributor is never run: nothing registers.
+      inject: () => () => {},
+      register: () => () => {},
+    },
+  }
+}
+
+/*
+ * 6a. The false positive itself.
+ *
+ * The bundle has loaded and `apply` has registered the section, but the user has not opened
+ * 设置 → QQ, so the component has never run. That state — the ordinary one on any launch that stays
+ * in the conversation view — used to be reported as "设置页在 20 秒内没有渲染" once per boot.
+ */
+if (typeof timers[0]?.callback === 'function') {
+  try {
+    timers[0].callback()
+  } catch (error) {
+    check('watchdog callback runs without throwing', false, String(error))
+  }
+}
+check(
+  'a registered section with the page never opened is not reported (the old false positive)',
+  beacons.length === 0,
+  `${beacons.length} beacon(s)`,
+)
+
+// 6b. Reverse control: the failure the watchdog exists for is still reported — a bundle that loads
+//     and never manages to register the section.
+{
+  const fresh = loadFreshClient(React)
+  equal('reverse control: the fresh instance armed its own watchdog', fresh.timers.map((timer) => timer.delay), [20_000])
+  fresh.fireWatchdog()
+  equal('reverse control: nothing registered, so exactly one report', fresh.beacons.length, 1)
+  equal('report went to PREFIX/client-error', fresh.beacons[0]?.url, '/.dsh-qq-plugin/client-error')
+  let body
+  try {
+    body = JSON.parse(await fresh.beacons[0]?.blob?.text?.())
+  } catch {
+    body = undefined
+  }
+  equal('report shape is { scope, message, stack }', Object.keys(body ?? {}).sort(), ['message', 'scope', 'stack'])
+  // The scope names the step that failed. `mount` described a step this watchdog never watched.
+  equal('report scope is register, not mount', body?.scope, 'register')
+  check('the message names the step that failed (registration)', String(body?.message ?? '').includes('注册'), true)
+  check('the message no longer claims the page failed to render', !String(body?.message ?? '').includes('没有渲染'), true)
+
+  // 6c. The same failure through `apply`: the registry exists but never declares the slot — the case
+  //     `slots.inject` exists for. Still reported.
+  const second = loadFreshClient(React)
+  let secondApplyError
+  try {
+    second.exports.apply(undeclaredSlotContext())
+  } catch (error) {
+    secondApplyError = error
+  }
+  check('declare-less shell: apply does not throw', secondApplyError === undefined, String(secondApplyError ?? ''))
+  second.fireWatchdog()
+  equal('declare-less shell: the watchdog still reports', second.beacons.length, 1)
+}
+
+/*
+ * 6d. Static: the signal is set where the registration happens, and nowhere in the component body.
+ *
+ * The second half is what the old code got wrong, and it is asserted here rather than inferred: a
+ * flag set only in the component body is a flag that says "somebody opened the page".
+ */
+{
+  const registerAt = code.indexOf('ctx.slots.register(')
+  const signalAt = code.indexOf('sectionRegistered = true')
+  const componentAt = code.indexOf('function QqSettings(')
+  const componentEnd = code.indexOf('function makePick(')
+  check('the health signal is set in apply', signalAt > registerAt && registerAt >= 0)
+  check(
+    'the component body does not set it (that is the false positive: it only runs when opened)',
+    componentAt >= 0 &&
+      componentEnd > componentAt &&
+      !code.slice(componentAt, componentEnd).includes('sectionRegistered'),
+  )
+}
+
+/*
+ * 6e. Render errors: an optional seam, subscribed when the shell offers it and harmless when not.
+ *
+ * These reports go through the stub installed below for the whole run, so they are counted on
+ * `beacons` — the fresh instances' own arrays only see what is reported while their own stubs are
+ * installed, which is the watchdog firing and nothing else.
+ */
+{
+  const offered = loadFreshClient(React)
+  const listeners = []
+  const registeredComponents = []
+  const renderCtx = {
+    effect: (factory) => factory(),
+    slots: {
+      inject: (slot, factory) => {
+        factory()
+        return () => {}
+      },
+      register: (options, component) => {
+        registeredComponents.push(component)
+        return () => {}
+      },
+      onEntryError: (listener) => {
+        listeners.push(listener)
+        return () => listeners.splice(listeners.indexOf(listener), 1)
+      },
+    },
+  }
+  let offeredError
+  try {
+    offered.exports.apply(renderCtx)
+  } catch (error) {
+    offeredError = error
+  }
+  check('onEntryError offered: apply does not throw', offeredError === undefined, String(offeredError ?? ''))
+  equal('onEntryError offered: it was subscribed once', listeners.length, 1)
+  const ourComponent = registeredComponents[0]
+  if (typeof listeners[0] !== 'function') {
+    check('a render crash of our own section is reported', false, 'no listener')
+  } else {
+    listeners[0]('settings.section', { component: ourComponent }, new Error('boom'))
+    equal('a render crash of our own section is reported', beacons.length, 1)
+    let renderBody
+    try {
+      renderBody = JSON.parse(await beacons[0]?.blob?.text?.())
+    } catch {
+      renderBody = undefined
+    }
+    equal('render crash is reported under scope render', renderBody?.scope, 'render')
+    // Nothing else is attributed to us: another slot, or another plugin's component in our slot.
+    listeners[0]('settings.section', { component: function Other() {} }, new Error('not ours'))
+    listeners[0]('other.section', { component: ourComponent }, new Error('not our slot'))
+    equal('another plugin\u2019s crash is not attributed to us', beacons.length, 1)
+  }
+
+  // A shell whose `onEntryError` itself throws: the extra coverage is lost, not the section.
+  const broken = loadFreshClient(React)
+  const reportsBefore = beacons.length
+  let brokenError
+  try {
+    broken.exports.apply({
+      effect: (factory) => factory(),
+      slots: {
+        inject: (slot, factory) => {
+          factory()
+          return () => {}
+        },
+        register: () => () => {},
+        onEntryError: () => {
+          throw new Error('no such channel')
+        },
+      },
+    })
+  } catch (error) {
+    brokenError = error
+  }
+  check('a broken onEntryError does not fail activation', brokenError === undefined, String(brokenError ?? ''))
+  equal('a broken onEntryError is itself reported', beacons.length - reportsBefore, 1)
+  let brokenBody
+  try {
+    brokenBody = JSON.parse(await beacons[reportsBefore]?.blob?.text?.())
+  } catch {
+    brokenBody = undefined
+  }
+  equal('that report is scoped watchdog', brokenBody?.scope, 'watchdog')
+
+  // A shell that has no such channel at all: the optional capability is simply absent.
+  const absent = loadFreshClient(React)
+  let absentError
+  let absentDisposer
+  try {
+    absent.exports.apply({
+      effect: (factory) => {
+        absentDisposer = factory()
+      },
+      slots: {
+        inject: (slot, factory) => {
+          factory()
+          return () => {}
+        },
+        register: () => () => {},
+      },
+    })
+  } catch (error) {
+    absentError = error
+  }
+  check('a shell without onEntryError still activates', absentError === undefined, String(absentError ?? ''))
+  check('a shell without onEntryError still hands back a disposer', typeof absentDisposer, 'function')
+  equal('a shell without onEntryError reports nothing extra', absent.beacons.length, 0)
+}
+
 // Restore the real globals so a failed check cannot leave the harness stubbed.
 for (const name of ['setTimeout', ...defined]) {
   const real = realGlobals[name]
@@ -261,7 +508,7 @@ for (const name of ['setTimeout', ...defined]) {
   else Object.defineProperty(globalThis, name, real)
 }
 
-console.log('\n-- 6. Copy tables --')
+console.log('\n-- 7. Copy tables --')
 
 /*
  * The copy table is a literal of strings only, so it can be read out of the source and compared
@@ -308,10 +555,365 @@ const unused = zhKeys.filter((key) => !usedKeys.includes(key))
 equal('no copy key is declared and never read', unused, [])
 console.log(`      (${usedKeys.length} copy keys read by the component)`)
 
+console.log('\n-- 8. Form state flow: unsaved note, refused field, cancel vs picker failure --')
+
+/*
+ * The component is run here with a stand-in React and a stand-in `fetch`.
+ *
+ * This is not a render and not a DOM: nothing is laid out, no CSS is applied and no browser is
+ * involved (see the header). What it does exercise is the part a static check cannot reach — the
+ * state transitions the user's complaint was about. The element tree the component returns is walked
+ * as plain objects, and the assertions are about which copy appears in which state, and about what
+ * the page compared before it claimed success.
+ */
+
+/** A React stand-in: state cells keyed by hook order, effects collected, elements as plain objects. */
+function createHookRuntime() {
+  const cells = []
+  const effects = []
+  let cursor = 0
+  const React = {
+    createElement: (type, props, ...children) => ({
+      type,
+      props: { ...(props ?? {}), children: children.length <= 1 ? children[0] : children },
+    }),
+    useState: (initial) => {
+      const index = cursor++
+      if (cells.length <= index) cells[index] = typeof initial === 'function' ? initial() : initial
+      return [
+        cells[index],
+        (next) => {
+          cells[index] = typeof next === 'function' ? next(cells[index]) : next
+        },
+      ]
+    },
+    useEffect: (effect) => {
+      effects.push(effect)
+    },
+    useCallback: (callback) => callback,
+  }
+  return {
+    React,
+    /**
+     * Render the component once.
+     *
+     * The effects are dropped on every render and run only when asked, which is what a mount does:
+     *    the component's own effects are mount-time work, and the harness has no scheduler.
+     */
+    render(component, props, runEffects = false) {
+      cursor = 0
+      const tree = component(props)
+      const pending = effects.splice(0)
+      if (runEffects) for (const effect of pending) effect()
+      return tree
+    },
+  }
+}
+
+/** Visit every element and text node of the returned tree, parents before children. */
+function walkTree(node, visit) {
+  if (node === null || node === undefined || typeof node === 'boolean') return
+  if (Array.isArray(node)) {
+    for (const child of node) walkTree(child, visit)
+    return
+  }
+  if (typeof node === 'string' || typeof node === 'number') {
+    visit({ type: '#text', text: String(node) })
+    return
+  }
+  if (typeof node !== 'object') return
+  visit(node)
+  walkTree(node.props?.children, visit)
+}
+
+/** Every string the tree renders, in order. */
+function textsOf(tree) {
+  const texts = []
+  walkTree(tree, (node) => {
+    if (node.text !== undefined) texts.push(node.text)
+  })
+  return texts
+}
+
+/** The first element matching `predicate`. */
+function findInTree(tree, predicate) {
+  let found
+  walkTree(tree, (node) => {
+    if (found === undefined && predicate(node)) found = node
+  })
+  return found
+}
+
+// The section restores `window`/`document`/`navigator` on its way out (see section 6), and the
+// component needs all three.
+defineGlobal('window', {
+  __ModuleLoader__: { load: (spec) => { registered = spec } },
+  addEventListener: () => {},
+  removeEventListener: () => {},
+})
+defineGlobal('document', {
+  documentElement: { lang: 'zh-CN' },
+  getElementById: () => null,
+  createElement: () => ({ id: '', textContent: '', remove: () => {} }),
+  head: { append: () => {} },
+})
+defineGlobal('navigator', { language: 'zh-CN', sendBeacon: () => true })
+
+/** The real timer, for waiting; the component's own timers are captured and never fire. */
+const realSetTimeout = globalThis.setTimeout
+const realSetInterval = globalThis.setInterval
+const realClearInterval = globalThis.clearInterval
+defineGlobal('setInterval', () => 0)
+defineGlobal('clearInterval', () => {})
+defineGlobal('setTimeout', (callback, delay) => ({ callback, delay }))
+
+/** Poll for a state the async work reaches, rather than sleeping a fixed time. */
+async function waitFor(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => realSetTimeout(resolve, 2))
+  }
+}
+
+/** The settings the stand-in host holds; `mergeWindowMs` is the field the tests change. */
+const hostSettings = {
+  permissionPreset: 'danger-full-access',
+  requireConfirmation: true,
+  allowCrossSessionNotify: true,
+  settleMs: 1200,
+  presenceNote: 'note',
+  mergeWindowMs: 10_000,
+  autoReplyAttachments: true,
+  maxReplyChars: 4000,
+  workspacePath: '',
+}
+
+/** What `POST /settings` answers with. `'echo'` stores what was sent — the honest host. */
+let postAnswer = { ...hostSettings }
+/** The last request body the page posted, so the assertions can name what it actually sent. */
+let postedPatch
+const fetched = []
+const cannedFetch = async (path, options) => {
+  const url = String(path)
+  fetched.push(url)
+  let body = {}
+  if (url.endsWith('/status')) {
+    body = { connected: false, errors: [], workspace: 'C:\\ws', replyLimiter: { limit: 4, ttlHours: 1 } }
+  } else if (url.endsWith('/login')) {
+    body = { phase: 'idle' }
+  } else if (url.endsWith('/settings')) {
+    if (options?.method === 'POST') {
+      postedPatch = JSON.parse(options.body)
+      const stored = postAnswer === 'echo' ? { ...hostSettings, ...postedPatch } : postAnswer
+      body = { settings: stored, defaults: hostSettings }
+    } else {
+      body = { settings: { ...hostSettings }, defaults: hostSettings }
+    }
+  } else if (url.endsWith('/permission-presets')) {
+    body = { applied: 'default', sentinel: 'default', available: [], note: '' }
+  } else if (url.endsWith('/log')) {
+    body = { path: 'boot.log', tail: '' }
+  } else if (url.endsWith('/accounts')) {
+    body = { accounts: [] }
+  }
+  return { ok: true, status: 200, text: async () => JSON.stringify(body) }
+}
+defineGlobal('fetch', cannedFetch)
+
+/**
+ * Mount the settings section of a fresh client instance and drive it to the loaded state.
+ *
+ * @param {object} [options] - `pick` stands in for the folder chooser the slot would inject.
+ * @returns {{ texts: () => string[], find: Function, draw: Function }} The mounted form.
+ */
+async function mountForm({ pick } = {}) {
+  const hook = createHookRuntime()
+  const instance = loadFreshClient(hook.React)
+  const components = []
+  instance.exports.apply({
+    effect: (factory) => factory(),
+    slots: {
+      inject: (slot, factory) => {
+        factory()
+        return () => {}
+      },
+      register: (options, component) => {
+        components.push(component)
+        return () => {}
+      },
+    },
+  })
+  const component = components[0]
+  const props = pick === undefined ? {} : { pick }
+  /**
+   * Re-render from the current state.
+   *
+   * Every read goes through here: the tree is a snapshot, so `texts()`/`find()` have to draw again
+   * after the async work has moved the state on.
+   */
+  const draw = () => {
+    const tree = hook.render(component, props)
+    return tree
+  }
+  hook.render(component, props, true)
+  return {
+    draw,
+    texts: () => textsOf(draw()),
+    find: (predicate) => findInTree(draw(), predicate),
+  }
+}
+
+const isButtonLabelled = (label) => (node) => node.type === 'button' && node.props?.children === label
+
+// ---- 8a. The unsaved-changes note (A1) ----
+{
+  const form = await mountForm()
+  const loaded = await waitFor(() => form.texts().includes('行为设置'))
+  check('前置：设置页跑到了已加载状态（否则这一节什么都没测）', loaded, true)
+  equal(
+    'A1 反向对照：没有改动时不出现「有改动还没保存。」',
+    form.texts().includes('有改动还没保存。'),
+    false,
+  )
+
+  /*
+   * A5: the page already answers the two different questions apart — what is *in effect* and what
+   * is *stored* — and this pins it so it cannot quietly collapse back into one value.
+   *
+   * The stand-in host reports the workspace in effect as `C:\ws` while the stored value is the empty
+   * string, so the two are distinguishable in one render.
+   */
+  const workspaceBox = form.find((node) => node.type === 'input' && node.props?.type === 'text')
+  check('A5 前置：找到「会话文件夹路径」输入框', workspaceBox !== undefined)
+  equal('A5 输入框里是设置里存的值（空串 = 用默认位置）', workspaceBox?.props?.value, '')
+  equal('A5 同屏另有「当前生效」那一项', form.texts().includes('当前生效：'), true)
+  equal('A5 生效值来自 /status，与输入框里的值与来源都不同', form.texts().includes('C:\\ws'), true)
+
+  const numberInput = form.find((node) => node.type === 'input' && node.props?.type === 'number')
+  check('前置：找到数值输入框', numberInput !== undefined)
+  if (numberInput !== undefined) {
+    numberInput.props.onChange({ target: { value: '4321' } })
+    form.draw()
+    equal('A1 有未保存改动时提示出现', form.texts().includes('有改动还没保存。'), true)
+    equal('A1 有未保存改动时不说「已保存」', form.texts().includes('已保存'), false)
+  }
+
+  // The host refuses `mergeWindowMs` (the reply is the value it holds, not the value sent), so the
+  // reply differs from the patch in exactly one field.
+  postAnswer = { ...hostSettings }
+  const save = form.find(isButtonLabelled('保存设置'))
+  check('前置：找到保存按钮', save !== undefined)
+  save?.props.onClick()
+  const saved = await waitFor(() => form.texts().includes('已保存'))
+  check('前置：保存返回了（否则下面几条只是没跑到）', saved, true)
+  equal('A3 前置：页面发出的确实是改过的那个值', postedPatch?.mergeWindowMs, 4321)
+
+  const afterSave = form.texts()
+  const ignoredLine = afterSave.find((text) => text.includes('这些值没有被主机接受'))
+  check(
+    '★ A3 主机丢弃的字段被点名',
+    ignoredLine !== undefined && ignoredLine.includes('附件合并窗口（毫秒）'),
+    String(ignoredLine),
+  )
+  equal('★ A3 点名时不会只说"保存成功"了事（同一次状态里两者并存）', afterSave.includes('已保存'), true)
+  equal('A1 保存后「有改动还没保存。」消失', afterSave.includes('有改动还没保存。'), false)
+}
+
+// ---- 8b. Reverse control for A3: a host that keeps every value names nothing ----
+{
+  const form = await mountForm()
+  await waitFor(() => form.texts().includes('行为设置'))
+  const numberInput = form.find((node) => node.type === 'input' && node.props?.type === 'number')
+  numberInput?.props.onChange({ target: { value: '4321' } })
+  form.draw()
+  postAnswer = 'echo'
+  form.find(isButtonLabelled('保存设置'))?.props.onClick()
+  const saved = await waitFor(() => form.texts().includes('已保存'))
+  equal(
+    'A3 反向对照：主机照收时不该点名任何字段',
+    form.texts().some((text) => text.includes('这些值没有被主机接受')),
+    false,
+  )
+  equal('A3 反向对照：这一次保存确实发生过', saved, true)
+  equal('A3 反向对照：发出的是改过的值', postedPatch?.mergeWindowMs, 4321)
+}
+
+// ---- 8c. Save failure keeps its own place and never says 已保存 (A2) ----
+{
+  const form = await mountForm()
+  await waitFor(() => form.texts().includes('行为设置'))
+  defineGlobal('fetch', async () => {
+    throw new Error('ECONNREFUSED 127.0.0.1:19387')
+  })
+  form.find(isButtonLabelled('保存设置'))?.props.onClick()
+  const failed = await waitFor(() => form.texts().some((text) => text.includes('保存失败')))
+  check('A2 保存失败时页面报出主机的原话', failed, true)
+  const failureLine = form.texts().find((text) => text.includes('保存失败'))
+  check(
+    'A2 失败文案带上了主机原话',
+    String(failureLine ?? '').includes('ECONNREFUSED'),
+    String(failureLine ?? ''),
+  )
+  equal('A2 保存失败时不再出现「已保存」', form.texts().includes('已保存'), false)
+  defineGlobal('fetch', cannedFetch)
+}
+
+// ---- 8d. The folder chooser: a cancelled dialog is not a failure, a broken one is (A2) ----
+{
+  const cancelled = await mountForm({ pick: async () => null })
+  await waitFor(() => cancelled.texts().includes('行为设置'))
+  const realError = console.error
+  const errorCalls = []
+  console.error = (...args) => {
+    errorCalls.push(args.map((value) => String(value)).join(' '))
+  }
+  try {
+    cancelled.find(isButtonLabelled('选择…'))?.props.onClick()
+    await waitFor(() => cancelled.texts().some((text) => text.includes('选择文件夹失败')), 300)
+    equal(
+      'A2 用户取消：不报错（取消是正常路径，弹报错同样是误导）',
+      cancelled.texts().some((text) => text.includes('选择文件夹失败')),
+      false,
+    )
+    equal('A2 用户取消：连控制台也不该有', errorCalls.length, 0)
+
+    const broken = await mountForm({
+      pick: async () => {
+        throw new Error('no directory picker is available in this client')
+      },
+    })
+    await waitFor(() => broken.texts().includes('行为设置'))
+    broken.find(isButtonLabelled('选择…'))?.props.onClick()
+    const reported = await waitFor(() => broken.texts().some((text) => text.includes('选择文件夹失败')))
+    check('A2 选择器失败：页面报出来', reported, true)
+    const pickLine = broken.texts().find((text) => text.includes('选择文件夹失败'))
+    check(
+      'A2 选择器失败：附上主机的原话，而不是一句无信息量的"失败"',
+      String(pickLine ?? '').includes('no directory picker is available in this client'),
+      String(pickLine ?? ''),
+    )
+    check('A2 选择器失败：也进了控制台（用户不看控制台，开发者看）', errorCalls.some((line) => line.includes('选择文件夹失败')), true)
+  } finally {
+    console.error = realError
+  }
+}
+
+// Restore everything this section stubbed, so a failure cannot leave the harness stubbed.
+globalThis.setInterval = realSetInterval
+globalThis.clearInterval = realClearInterval
+for (const name of ['setTimeout', 'fetch', ...defined]) {
+  const real = realGlobals[name]
+  if (real === undefined) delete globalThis[name]
+  else Object.defineProperty(globalThis, name, real)
+}
+
 console.log(`\n=== ${checks - failures.length}/${checks} checks passed ===`)
 if (failures.length > 0) {
   console.log(`failed: ${failures.join(' | ')}`)
   process.exitCode = 1
 } else {
   console.log('visual verification: NOT PERFORMED (no renderer, no browser, no live host)')
+  console.log('state-flow verification: PERFORMED against a stub React and a stub fetch (no DOM, no CSS)')
 }
