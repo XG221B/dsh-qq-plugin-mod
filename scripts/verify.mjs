@@ -3012,6 +3012,134 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   }
 }
 
+/*
+ * ---- ★ 首次运行的三个缺陷：契约是"永不抛"，而且失败必须可见 ----------------
+ *
+ * 这三条来自一次外部审计（`_qq-audit/` 里有可逐个重跑的探针，每条都有实测输出）。
+ * 它们的共同点不是"会崩"，而是**崩在没有任何记录的地方**：
+ *
+ *   ① `configureLog` 的 mkdir 在 `apply` 的 try **之外** → 抛出去连一行都留不下
+ *   ② `mediaDir` 无保护 → 抛在 `#handleInbound` 的 catch 里 → 整条入站消息连同正文一起消失
+ *   ③ `resolveWorkspaceDir` 只验用户填的路径、**不验回落目标** → 返回一个不存在的路径
+ *
+ * 每一条都配一个"把保护拿掉就必须红"的反向对照（真的把 try/catch 或 mkdir 去掉跑过），
+ * 所以这里钉的是行为，不是注释。
+ *
+ * ⚠️ 可达性如实写在 `lib/log.js` / `lib/paths.js` / `lib/media.js` 的注释里：
+ * ① 需要 `$DSH_HOME` 不可创建（那种情况下 DSH 自己大概也起不来），价值是防御纵深；
+ * ③ 的两行 mkdir 在 shipped 配置下不可达（`cordis.patch.yml` 只设了 `autoStart`）。
+ * 它们不是"新用户一定会撞上"的必现缺陷。
+ */
+{
+  const { mkdirSync: mkdirFix, mkdtempSync, existsSync, rmSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const log = await import('../lib/log.js')
+  const m = await import('../lib/media.js')
+  const p = await import('../lib/paths.js')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-qq-firstrun-'))
+  try {
+    // ---- ① 日志目录建不出来：不抛，而且仍然留下一行可见输出 ----
+    {
+      // `$DSH_HOME` 的位置上是一个普通文件 → `$DSH_HOME/qq` 建不出来（ENOTDIR）。
+      const brokenHome = join(dir, 'log-home-is-a-file')
+      writeFileSync(brokenHome, 'this is a file, not a directory', 'utf8')
+      const lines = []
+      const realLog = console.log
+      console.log = (...args) => {
+        lines.push(args.map((value) => String(value)).join(' '))
+      }
+      let threw = false
+      try {
+        log.configureLog(brokenHome)
+        // `bootLog` 无论写不写盘都会 console.log 一份 —— 这正是"至少一行可见输出"的来源。
+        log.bootLog('故障下的这一行必须看得见')
+      } catch {
+        threw = true
+      }
+      console.log = realLog
+      check('★ ① 日志目录建不出来时 configureLog 不抛（它在 apply 的 try 之外）', threw, false)
+      check(
+        '★ ① 同一故障下 bootLog 仍然留下至少一行可见输出（从前是 0 行）',
+        lines.filter((line) => line.includes('故障下的这一行必须看得见')).length,
+        1,
+      )
+    }
+
+    // ---- ② 媒体目录建不出来：不抛，返回的路径交给下载那一步去失败 ----
+    {
+      const ws = join(dir, 'ws-media-occupied')
+      mkdirFix(ws, { recursive: true })
+      writeFileSync(join(ws, m.MEDIA_DIR_NAME), 'a file where the media directory should be', 'utf8')
+      let threw = false
+      let made
+      try {
+        made = m.mediaDir(ws)
+      } catch {
+        threw = true
+      }
+      check('★ ② 媒体目录建不出来时 mediaDir 不抛（抛了整条入站消息会连同正文一起消失）', threw, false)
+      check(
+        '★ ② 仍然返回那个路径（下载那一步会失败并退化成 describeMissing）',
+        made,
+        join(ws, m.MEDIA_DIR_NAME),
+      )
+    }
+
+    // ---- ③ resolvePaths：默认位置也要建（`settings.workspacePath` 的默认值是空串）----
+    {
+      const home = join(dir, 'paths-home')
+      mkdirFix(home, { recursive: true })
+      const custom = join(dir, 'paths-custom')
+      /*
+       * `resolveHome` 会读 `process.env.DSH_HOME`。这里必须接管它——否则这一节会拿
+       * 真实的 home 去 mkdir（那就是"测试去动用户的目录"，比它要验的缺陷更糟）。
+       */
+      const savedHome = process.env.DSH_HOME
+      process.env.DSH_HOME = home
+      let resolved
+      try {
+        resolved = p.resolvePaths({ get: () => undefined }, { workspace: custom })
+      } finally {
+        if (savedHome === undefined) delete process.env.DSH_HOME
+        else process.env.DSH_HOME = savedHome
+      }
+      check('★ ③ config.workspace 生效时，默认位置也被建出来', existsSync(join(home, p.WORKSPACE_DIR_NAME)), true)
+      check('★ ③ 而 workspace 仍然是 config.workspace 指的那个（没有改变语义）', resolved.workspace, custom)
+    }
+
+    // ---- ③ resolveWorkspaceDir：回落目标必须真的可用，否则带 reason 返回 ----
+    {
+      const home = join(dir, 'fallback-home')
+      mkdirFix(home, { recursive: true })
+      // 相对路径必然被拒并回落 —— 审计实测这里从前返回的是一个**不存在**的路径。
+      const relative = p.resolveWorkspaceDir(home, 'my-qq-folder')
+      check('★ ③ 回落目标现在真的存在（从前返回一个不存在的路径）', existsSync(relative.path), true)
+
+      // 回落目标**自己**也不可用：那个位置上放一个普通文件。
+      const blocked = join(dir, 'fallback-blocked')
+      mkdirFix(blocked, { recursive: true })
+      writeFileSync(join(blocked, p.WORKSPACE_DIR_NAME), 'a file where the fallback should be', 'utf8')
+      let threw = false
+      let rejected
+      let defaulted
+      try {
+        rejected = p.resolveWorkspaceDir(blocked, 'my-qq-folder')
+        defaulted = p.resolveWorkspaceDir(blocked, '')
+      } catch {
+        threw = true
+      }
+      check('★ ③ 回落目标也不可用时仍然不抛（契约没被改弱）', threw, false)
+      check('★ ③ 并把"回落目标也不可用"写进 reason', String(rejected?.reason).includes('回落目标'), true)
+      check('★ ③ 也仍然保留"不是绝对路径"这个首要原因', String(rejected?.reason).includes('不是绝对路径'), true)
+      check('★ ③ 默认位置不可用时同样不抛、fellBack 仍是 false', defaulted?.fellBack, false)
+      check('★ ③ 并把原因带在 reason 里（调用方据此记进错误环）', String(defaulted?.reason).includes('回落目标'), true)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 // ---- StateStore 真实磁盘往返 ★ ---------------------------------------------
 // 这一节是为了一个已经踩过的坑而加的：`readFile` 曾从 `node:fs`（回调版）导入，
 // 于是每次读都是空状态、每次写只写回自己那一半，accounts 与 bindings 互相覆盖。

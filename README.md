@@ -324,7 +324,7 @@ node scripts/verify-client.mjs   # client registration shape (not a visual check
 node scripts/verify-send-path.mjs  # the send path, against a fake SDK
 ```
 
-**770** host checks, **108** client checks, **60** send-path checks.
+**782** host checks, **108** client checks, **60** send-path checks.
 
 Those three numbers are **read out of the runs above, not typed by hand**: `tools/check-doc-counts.mjs`
 compares them against what the scripts actually print, and the CI job fails naming the file if any of
