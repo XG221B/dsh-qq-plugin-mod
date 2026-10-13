@@ -240,7 +240,7 @@
   | `requireConfirmation` | `boolean` | `true` | 「会话操作先确认」 |
   | `allowCrossSessionNotify` | `boolean` | `true` | 「允许任意会话主动推送」 |
   | `settleMs` | `number`（毫秒，≥0） | `1200` | 「回复聚合静默窗口（毫秒）」 |
-  | `presenceNote` | `string` | 一段中文渠道说明（`DEFAULT_PRESENCE_NOTE`） | 「渠道上下文说明」（多行 `textarea`） |
+  | `presenceNote` | `string` | 一段中文渠道说明（`DEFAULT_PRESENCE_NOTE`，定义在 `lib/settings.js`） | 「渠道上下文说明」（多行 `textarea`） |
   | `mergeWindowMs` | `number`（毫秒，≥0） | `10000` | 「附件合并窗口（毫秒）」 |
   | `autoReplyAttachments` | `boolean` | `true` | 「自动回应附件」 |
   | `maxReplyChars` | `number`（≥0，**`0` 表示不限制**） | `4000` | 「单条回复字数上限」 |
@@ -258,6 +258,17 @@
   另外：**改路径不搬动已有的对话**——它们留在旧文件夹，只有之后新建的用新路径。
   这是唯一安全的做法：宿主在采用已存在会话时比对 `cwd`，不一致会抛
   `ApiSessionCwdConflict`，那个会话就永远接不回来了。
+
+  ⚠️ **这张表的唯一来源是 `lib/settings.js` 的 `SETTINGS_SCHEMA`**（每项一个校验器
+  加一个 `default`）。`settingsForPage()` 的 `settings` / `defaults` 两层都由它派生，
+  加载归一（`state.js`）与落盘（`runtime.js` `#persistSettings()`）也一样——
+  所以这里列的九项若与那份 schema 不符，**以 schema 为准并回来改本文**。
+  加一项设置只需在 schema 里加一行：往返测试的断言数会跟着走，
+  而"运行时持有的字段集"与 schema 键集不一致会被 `verify.mjs` 当场判红
+  （纯 JS 没有编译器，那条键集一致性断言就是 schema 的守护）。
+  之前这里是**三份各写各的名单**，加设置时漏掉任何一份都会让那个字段在加载时被丢弃，
+  而且每次写盘都重新加载并重新规范化，于是下一次写盘把丢失**持久化**——
+  表现就是"重启后设置忘了"。微信插件的同一条故障见其提交 `5cbe7d2`。
 
   ⚠️ **`0` 在 `mergeWindowMs` 与 `maxReplyChars` 上都是合法值**，含义分别是"不等待"与"不限制"。
   客户端用 `editNumber()`（`Number.isFinite` + `Math.max(0, n)`，空串映射为 `0`）处理，
@@ -287,14 +298,20 @@
 - **客户端读法**：`const saved = isRecord(result.settings) ? result.settings : state.draft`，
   并在 2.5 秒内于按钮旁显示「已保存」。
 - **现状安全性**：路由把**原始 body** 交给 `applySettings()`，而 `applySettings()` 自己逐字段
-  判类型（布尔只认布尔；`settleMs` 只认有限非负数），所以畸形请求改不动运行时状态。**保持这个分工。**
+  判类型（走的正是 `lib/settings.js` 的 `SETTINGS_SCHEMA`：布尔只认布尔；
+  `settleMs` 只认有限非负数且不超上限，通过则取整），所以畸形请求改不动运行时状态。
+  **保持这个分工**：路由不校验，`applySettings()` 才校验。
   ⚠️ `applySettings()` 在 `requireConfirmation` 变化时会 `refreshTools()`——那是刻意的
   （该策略只存在于 `session_control` 的工具描述里），**不要**绕过它直接改私有字段。
 - **持久化**：**这些设置现在会持久化**（写入状态文件的 `settings` 块），
   启动时由 `runtime.hydrateSettings()` 读回，所以重启后仍是用户选的那份。
-  老状态文件（没有 `settings` 块）照常可读，缺字段回落常量默认值。
+  老状态文件（没有 `settings` 块）照常可读，缺字段回落 schema 的 `default`。
   ⚠️ 这条以前写的是"只在内存里、重启回默认"——**那是旧行为，已不成立**；
   设置静默回默认是最糟的一种"没有效果"，用户要到下次需要它时才发现。
+- **落盘清单也是派生出来的**：`#persistSettings()` 遍历 `SETTINGS_SCHEMA` 的键，
+  不再手抄第二份字段名单（那正是上面那条故障的成因）。
+  校验语义：**类型不对或越界就丢弃该字段**（保持原值/默认值），不是回落到默认值；
+  空串在 `presenceNote`（= 不要这段说明）与 `workspacePath`（= 用默认位置）上都是合法值。
 
 ---
 
@@ -489,8 +506,9 @@
 2. **`onQrDisplayed` 的时序**：`login.js` 先落 `phase:'running'` + `qrUrl`，
    再异步补 `qrDataUrl`。客户端按「非终态即轮询」处理，所以中间这一小段没有二维码图是正常的。
    若实测发现 `starting` 会停留很久，应该优先在宿主侧补 `step`（§2.4），而不是改客户端。
-3. **`settings` 是否需要持久化**：目前只在内存，重启回到默认值。契约只要求「读到的就是真的」；
-   客户端**不假定**它会被持久化。
+3. **`settings` 是否需要持久化**：**需要，而且已经做了**——见 §2.9 结尾。
+   契约只要求「读到的就是真的」；客户端**不假定**它会被持久化，宿主侧的持久化
+   对页面而言是"顺带的好处"（重启后草稿初值仍是用户选的那份）。
 4. **帮助链接**：`HANDBOOK_URL = 'https://bot.q.qq.com/wiki/'` 是 QQ 官方机器人文档站
    （搜索结果里具体页形如 `https://bot.q.qq.com/wiki/develop/api-v2/...`）。
    这不是本插件自己的手册——如果之后写了 `docs/HANDBOOK-USER.md` 之类，应换成自己的地址。

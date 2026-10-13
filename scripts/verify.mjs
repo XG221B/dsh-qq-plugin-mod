@@ -1172,6 +1172,10 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ settingsForPage 返回 settings/defaults 两层', JSON.stringify(Object.keys(page).sort()), JSON.stringify(['defaults', 'settings']))
     const pageKeys = Object.keys(page.settings).sort()
     check('★ 两层键集合一致', JSON.stringify(Object.keys(page.defaults).sort()), JSON.stringify(pageKeys))
+    // ⚠️ 这里**故意写死九项名字**，不从 schema 派生。
+    // 派生的话就成了自己跟自己比（schema 少一项它也跟着少，永远相等），
+    // 而这条断言的用途恰恰是：把设置页对客户端承诺的字段集钉住。
+    // "schema 与运行时实际持有的字段集一致"由下面那段 schema 驱动的测试负责，两条各司其职。
     check('★ 设置项就是这九项', JSON.stringify(pageKeys), JSON.stringify(['allowCrossSessionNotify', 'autoReplyAttachments', 'maxReplyChars', 'mergeWindowMs', 'permissionPreset', 'presenceNote', 'requireConfirmation', 'settleMs', 'workspacePath']))
     const defaults = page.defaults
     check('默认预设与微信一致', defaults.permissionPreset, 'danger-full-access')
@@ -1182,11 +1186,17 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ 默认自动回应附件与微信一致', defaults.autoReplyAttachments, true)
     check('★ 默认回复字数上限与微信一致（4000）', defaults.maxReplyChars, 4000)
     // 这段说明的**每一句都对应一种真实发生过的答非所问**，所以逐句钉住，而不是只比长度。
-    check('★ presenceNote 说明对方在手机', defaults.presenceNote.includes('在手机上'), true)
-    check('★ presenceNote 说明看不到屏幕与文件系统', defaults.presenceNote.includes('看不到这台电脑的屏幕和文件系统'), true)
-    check('★ presenceNote 要求直接发送而不是让用户去看路径', defaults.presenceNote.includes('不要让他去'), true)
-    check('★ presenceNote 要求回复简短', defaults.presenceNote.includes('回复尽量简短'), true)
-    check('presenceNote 标注的渠道是 QQ', defaults.presenceNote.includes('[渠道：QQ]'), true)
+    //
+    // ⚠️ 取值为 undefined 时用空串兜住（`?? ''`）是有意的：设置项被漏掉时这几条要**报 FAIL**，
+    // 不能在这里抛 `Cannot read properties of undefined`。理由是位置——本段在 schema 驱动的
+    // 往返测试**之前**，一抛整个脚本就结束了，后面那些专门用来点名"缺了哪一项"的断言
+    // 一条都跑不到（第一版就是这样：删掉 `presenceNote` 只看到一句 TypeError）。
+    // 一条测试的失败必须看得懂缺的是什么，否则它只证明了"坏了"。
+    check('★ presenceNote 说明对方在手机', (defaults.presenceNote ?? '').includes('在手机上'), true)
+    check('★ presenceNote 说明看不到屏幕与文件系统', (defaults.presenceNote ?? '').includes('看不到这台电脑的屏幕和文件系统'), true)
+    check('★ presenceNote 要求直接发送而不是让用户去看路径', (defaults.presenceNote ?? '').includes('不要让他去'), true)
+    check('★ presenceNote 要求回复简短', (defaults.presenceNote ?? '').includes('回复尽量简短'), true)
+    check('presenceNote 标注的渠道是 QQ', (defaults.presenceNote ?? '').includes('[渠道：QQ]'), true)
 
     // ★ 扫码状态词表必须与设置页客户端契约一致（它认 phase 与 qrDataUrl）
     const bind = runtime.bindSnapshot()
@@ -1226,6 +1236,187 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ requireConfirmation 被持久化', restored.requireConfirmation, false)
     check('★ allowCrossSessionNotify 被持久化', restored.allowCrossSessionNotify, false)
     check('★ settleMs 被持久化', restored.settleMs, 700)
+
+    /*
+     * ============================================================================
+     * ★★★ 设置项的 schema 驱动往返 + 键集一致性（本次修复的核心测试）★★★
+     * ============================================================================
+     *
+     * ## 它挡的是哪一个故障
+     *
+     * 上面那四条只往返了**九个设置里的四个**（`permissionPreset`、
+     * `requireConfirmation`、`allowCrossSessionNotify`、`settleMs`），
+     * 另外五个（`presenceNote` / `mergeWindowMs` / `autoReplyAttachments` /
+     * `maxReplyChars` / `workspacePath`）从来没有被"写进去再读回来"验证过。
+     *
+     * 而本插件原来把设置名抄了**三遍**（`state.js` 的加载白名单、
+     * `runtime.js` `#persistSettings()` 的落盘清单、设置页快照）。三份手抄名单
+     * 不会一起改：加一项设置时漏掉 `state.js` 那一份，加载时它被丢弃，
+     * 而**每次写盘都会重新加载并重新规范化**，于是下一次写盘把这份丢失持久化了。
+     * 页面上的表现就是"重启后设置忘了"。微信插件踩过同一条（提交 `5cbe7d2`），
+     * 那边的修法是"映射类型下每项一个校验器 + 一个把每个默认值都点名的往返测试"。
+     *
+     * ## QQ 没有编译器，所以下面两条断言就是那个"编译错误"的等价物
+     *
+     * 1. **每条往返断言由 `SETTINGS_SCHEMA` 派生**：往 schema 里加一项，
+     *    断言数自动 +1（不用改测试），而**删掉** schema 里的一项会让
+     *    "写进去的值读回来变成默认值"当场变红。
+     *    这是它比上面四条硬的地方——上面四条写死了字段名，测试自己也会过时。
+     * 2. **键集一致性**：`SETTINGS_SCHEMA` 的键集、'运行时实际持有'的键集、
+     *    以及**真正落到盘上的**键集，三者必须完全相同。
+     *    '运行时实际持有'取自 `runtime.settingsSchema().heldKeys`——它是照着运行时的
+     *    `#settings` 对象**现场取出来的键**，不是第二份手抄名单。
+     *    真要是两份名单，那就等于把这个 bug 换个地方藏起来。
+     *    落盘键集则是从**盘上的 JSON**读出来的，也就是运行时真正写下去的东西。
+     */
+    const { SETTINGS_KEYS, SETTINGS_DEFAULTS, SETTINGS_SCHEMA } = await import('../lib/settings.js')
+    // 自己的读写：上面那两个 `readStateSync` / `writeFileSync` 在本块之后才声明
+    // （`const` 的暂时性死区），用它们会直接抛 ReferenceError。
+    const { readFileSync: readRoundTripFile, writeFileSync: writeRoundTripFile } = await import('node:fs')
+    const roundTripFile = join(dir, 'roundtrip-schema.json')
+    const makeRoundTripRuntime = () =>
+      new QqRuntime(ctx, {
+        home: dir,
+        stateFile: roundTripFile,
+        workspace: join(dir, 'ws-roundtrip'),
+        credentials,
+      })
+
+    /**
+     * 为一项设置造一个**合法、非默认、且 trim 后不变**的值。
+     *
+     * 关于 trim：`workspacePath` 在运行时里是 trim 过的，带首尾空格的值读回来
+     * 会短一截——那不是持久化的 bug 而是它的既有语义，所以这里不给它空格，
+     * 免得断言测的是 trim 而不是往返。
+     */
+    const roundTripValue = (key) => {
+      const fallback = SETTINGS_DEFAULTS[key]
+      if (typeof fallback === 'boolean') return !fallback
+      if (typeof fallback === 'number') return fallback + 37
+      return key === 'permissionPreset' ? 'auto' : `往返-${key}`
+    }
+    const roundTripPatch = Object.fromEntries(SETTINGS_KEYS.map((key) => [key, roundTripValue(key)]))
+
+    /*
+     * 整段包在 try 里：这一段的用途是**在设置项被漏掉时变红**，所以它自己绝不能崩。
+     * 一个抛异常的测试会以退出码 1 结束，但不会有任何一行带字段名的 FAIL——
+     * 缺的那一项叫什么就得靠人去猜（第一版就是这样：删掉 presenceNote 之后，
+     * 先抛的是更下面那条 `defaults.presenceNote.includes`，本段根本没跑到）。
+     */
+    let roundTripDefaultsRead = undefined
+    let roundTripWriter = undefined
+    try {
+      roundTripWriter = makeRoundTripRuntime()
+      roundTripWriter.applySettings(roundTripPatch)
+      // 写盘是 fire-and-forget，等一拍
+      await new Promise((resolve) => setTimeout(resolve, 120))
+
+      const storedSettings = JSON.parse(readRoundTripFile(roundTripFile, 'utf8')).settings ?? {}
+      /*
+       * ★★ 这一条是"编译错误"的等价物，四条来源全在：
+       *
+       *   schema 的键集 / 运行时**此刻实际持有**的键集 / **落盘**的键集。
+       *
+       * 前两者的关系要说清楚，否则容易以为它在自证：`#settings` 是照
+       * `{ ...SETTINGS_DEFAULTS }` 建出来的，所以 schema 少一项时两边会**一起**少，
+       * 这一条看不出问题（那不是它的职责——schema 少一项由上面"设置项就是这九项"
+       * 与各条硬编码断言去抓）。它抓的是**反方向**：有人在 `runtime.js` 里新加一个
+       * 设置字段（`this.#settings.xxx = …`）却没加进 schema。
+       * 那正是这个 bug 最可能的再现方式——而它极隐蔽：`#persistSettings()` 由 schema
+       * 驱动，于是**那个字段写不出去**，用户重启后设置就没了。
+       * 这里 `heldKeys` 会多出来，当场变红。反向对照实测过：见提交说明的突变实验 B。
+       */
+      check(
+        '★★ 键集一致：schema = 运行时实际持有 = 落盘（同一个集合）',
+        JSON.stringify([
+          [...SETTINGS_KEYS].sort(),
+          [...roundTripWriter.settingsSchema().heldKeys].sort(),
+          Object.keys(storedSettings).sort(),
+        ]),
+        JSON.stringify([[...SETTINGS_KEYS].sort(), [...SETTINGS_KEYS].sort(), [...SETTINGS_KEYS].sort()]),
+      )
+      /*
+       * 鉴别力前置：每一项都得**真的**写成了非默认值。
+       *
+       * 少了它，`roundTripValue` 万一哪天返回了默认值，"写进去再读回来相等"
+       * 就会因为两边都是默认值而恒真——一条永远通过的往返断言比没有更糟。
+       * 这里放在键集断言之后：schema 少了一项时，上一条先报出"缺了哪个"，
+       * 而不是让这一条以"值不相等"的面目抢答。
+       */
+      check(
+        '★ 前置：每一项都真的写成了非默认值（否则往返断言测不到东西）',
+        JSON.stringify(Object.keys(storedSettings).filter((key) => storedSettings[key] === SETTINGS_DEFAULTS[key])),
+        JSON.stringify([]),
+      )
+
+      /*
+       * ★★★ 真正的往返：**换个实例从同一份文件读回来，值必须与写进去的一致** ★★★
+       *
+       * 这一条是**非默认值**的往返，和下面那条"默认值点名"是两件不同的事，
+       * 少任何一条都会留下一个盲区：
+       *
+       * - 只比"读回来 = 默认值"（第一版就少了这一条）：盘上的值还在，但加载归一
+       *   **把它丢掉了**，于是读回来是默认值——而"默认值"正是它**应该**有的样子，
+       *   断言恒真。实测出来的：把 `state.js` 的加载归一换回**迁移前那份手抄的
+       *   八项白名单**（漏 `presenceNote`），只比默认值的版本**全绿通过**，
+       *   而这一条立刻报出 `presenceNote` 丢了。这正是微信插件那个 bug 的形状。
+       * - 反过来，只比"读回来 = 写进去的"而不点名默认值，就看不出"缺项该回落默认"。
+       */
+      const keptReader = makeRoundTripRuntime()
+      await keptReader.hydrateSettings()
+      const kept = {}
+      for (const key of SETTINGS_KEYS) {
+        const value = keptReader.settingsSnapshot()[key]
+        // `workspacePath` 在运行时里是 trim 过的（既有语义），往返值刻意不带空格，
+        // 所以这里两者本就相等；仍写出来是为了让"只有它会变"这件事留在代码里。
+        kept[key] = key === 'workspacePath' ? String(value).trim() : value
+      }
+      const lost = SETTINGS_KEYS.filter((key) => JSON.stringify(kept[key]) !== JSON.stringify(roundTripPatch[key]))
+      check(
+        '★★ 往返：每一项读回来的值都等于写进去的值（丢掉哪一项就点出哪一项）',
+        JSON.stringify(lost),
+        JSON.stringify([]),
+      )
+
+      /*
+       * 每个默认值都点名：把状态文件清空（没有 settings 块）再让一个**全新实例**读回来，
+       * 逐项必须等于 schema 的默认值。缺项回落默认值这条路径只有它能覆盖。
+       *
+       * 这就是微信那个"a round-trip test that names every default"：
+       * 循环走 `SETTINGS_KEYS`，所以加一项设置自动多一条断言。
+       */
+      writeRoundTripFile(roundTripFile, `${JSON.stringify({ version: 1 })}\n`, 'utf8')
+      const defaultsReader = makeRoundTripRuntime()
+      await defaultsReader.hydrateSettings()
+      roundTripDefaultsRead = defaultsReader.settingsSnapshot()
+    } catch (error) {
+      check(
+        '★★ schema 往返回合本身不该抛异常（抛了就看不到后面每项点名）',
+        error instanceof Error ? error.message : String(error),
+        '（无异常）',
+      )
+    }
+
+    const readDefaults = roundTripDefaultsRead ?? {}
+    const wrongDefaults = SETTINGS_KEYS.filter((key) => readDefaults[key] !== SETTINGS_DEFAULTS[key])
+    check(
+      `★ schema 驱动：${SETTINGS_KEYS.length} 个默认值逐个点名（缺项回落默认值，不多不少）`,
+      JSON.stringify(wrongDefaults),
+      JSON.stringify([]),
+    )
+    check(
+      '★ 每项都带自己的校验器（纯 JS 里用断言代替编译错误）',
+      SETTINGS_KEYS.filter((key) => typeof SETTINGS_SCHEMA[key]?.normalize === 'function').length,
+      SETTINGS_KEYS.length,
+    )
+
+    // 默认值本身与运行时对外报的默认值必须同源（页面读的是 `settingsForPage().defaults`）
+    const pageDefaults = roundTripWriter.settingsForPage().defaults
+    check(
+      '★ 设置页报的默认值与 schema 的默认值同源',
+      JSON.stringify(pageDefaults),
+      JSON.stringify(SETTINGS_DEFAULTS),
+    )
 
     /*
      * ---- ★★ 权限预设 setter 必须落盘（用户报的"设置不会保存"）★★ ----

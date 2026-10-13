@@ -216,6 +216,13 @@ Nine settings in total:
 Settings are **persisted** and survive a restart. An older state file (one with no `settings`
 block) still reads fine.
 
+Every setting is defined in exactly one place — `lib/settings.js`'s `SETTINGS_SCHEMA`, one
+validator plus one `default` per entry. Loading, saving, the settings page and the round-trip test
+are all derived from it, so adding a setting is one line there and nothing else can drift out of
+step. Plain JavaScript has no compiler to catch a forgotten setting, so
+`scripts/verify.mjs` asserts that the schema's key set, the key set the runtime actually holds, and
+the key set written to disk are the same set — that assertion is the compiler we do not have.
+
 Next to `workspacePath`, the **currently in effect** line shows the path actually in use, while the
 box holds the text you typed. Keeping the two apart is deliberate: when a path is wrong you can see
 what you wrote and change it, while still knowing which folder is really being used.
@@ -312,7 +319,7 @@ node scripts/verify-client.mjs   # client registration shape (not a visual check
 node scripts/verify-send-path.mjs  # the send path, against a fake SDK
 ```
 
-**293** host checks, **41** client checks, **60** send-path checks.
+**593** host checks, **41** client checks, **60** send-path checks.
 
 ### Standing checkers
 
