@@ -871,6 +871,642 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('★ Linux 不忽略大小写', si.isSameWorkspace('/A/B', '/a/b', false), false)
 }
 
+/*
+ * ---- 会话索引：时间取自记录、排序构成全序 ----------------------------------
+ *
+ * 这一节钉的是 QQ 从微信**修之前**的版本抄来的那两个 bug：
+ *
+ * 1. 时间取自会话目录里最新文件的 mtime——而 mtime 回答的是"这个目录最后被写是什么时候"，
+ *    任何写入都会改它，于是同一个会话每次显示的"上次时间"都不同，行序跟着变。
+ * 2. 排序只有一个键——时间撞车时落回目录遍历顺序，而"时间撞车"在真实存储里是常态。
+ *
+ * 断言全部走**真存储**（真目录、真文件），因为这两个 bug 都无法从纯函数上看出来；
+ * 而每一条都有反向对照：mtime 与记录时间**刻意反着放**，创建顺序与时间顺序也反着放，
+ * 所以任何一处退回旧实现都会当场变红。
+ */
+{
+  const { mkdirSync, rmSync, writeFileSync, utimesSync } = await import('node:fs')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const si = await import('../lib/session-index.js')
+
+  /**
+   * 往真存储里写一条会话记录。
+   *
+   * `mtimeSeconds` 与记录时间**故意分开给**：这正是"读的是记录不是文件"的判据。
+   *
+   * @param home - 造的 DSH 主目录。
+   * @param cwd - 这条会话记的工作目录。
+   * @param id - 会话 id。
+   * @param title - 标题。
+   * @param record - 记录里的时间字段，见下面三种形态。
+   * @param mtimeSeconds - 给正文文件打的 mtime；不给就不动它。
+   */
+  function seedRecorded(home, cwd, id, title, record, mtimeSeconds) {
+    const dir = join(home, 'sessions', si.encodeWorkspaceDir(cwd), id)
+    mkdirSync(dir, { recursive: true })
+    const transcript = join(dir, 'session.v4.jsonl.zstd')
+    writeFileSync(transcript, 'x')
+    if (mtimeSeconds !== undefined) utimesSync(transcript, mtimeSeconds, mtimeSeconds)
+    const indexDir = join(home, 'storages', 'session_projcache', 'sessions')
+    mkdirSync(indexDir, { recursive: true })
+    writeFileSync(
+      join(indexDir, `${id}.json`),
+      JSON.stringify({ version: 7, record: { identity: { cwd, ...record.identity }, rows: record.rows } }),
+      'utf8',
+    )
+  }
+
+  /** 一条只带 `lastPromptAt` 的记录，形态与真存储写的一致。 */
+  function promptRecord(cwd, title, lastPromptAt) {
+    return { identity: { cwd }, rows: { title: { val: title }, sessionListMetadata: { val: { lastPromptAt } } } }
+  }
+
+  function makeHome() {
+    return mkdtempSync(join(tmpdir(), 'dsh-qq-index-'))
+  }
+
+  // ---- 1. 时间取自记录，不是 mtime ----------------------------------------
+  {
+    const home = makeHome()
+    try {
+      const workspace = join(home, 'dsh_qq')
+      /*
+       * 八条会话，`lastPromptAt` 从新到旧分别是 index 0..7，落在 `ids[0..7]`；
+       * 而 mtime 是 `index` **秒**（1970 年）——两个量差着五十多年，正反都能分辨。
+       * 另外 id 的 6 位前缀按 0f,0e,…,08 **递减**：所以"按 id 升序"给出的是 `ids` 的**逆序**，
+       * 与时间顺序**正好相反**——退回单键排序（或用 id 当主键）都会印出另一份清单。
+       */
+      const ids = []
+      const stamps = []
+      for (let index = 0; index < 8; index += 1) {
+        const hex = (0x08 + index).toString(16).padStart(2, '0')
+        const id = `session-${hex}ffff-${hex}ffff-x`
+        const at = 1_700_000_000_000 + index * 3_600_000
+        ids.push(id)
+        stamps.push(at)
+        seedRecorded(home, workspace, id, `第${String(index)}条`, promptRecord(workspace, `第${String(index)}条`, at), index)
+      }
+      /*
+       * 反向对照的前提：`ids` 是升序而 `stamps` 是升序，于是**时间倒序**给出的正是 `ids` 的逆序。
+       * 一个只按 id 升序、不看时间的比较器会印出 `[...ids].reverse()`——与这里期望的相反。
+       */
+      check('★ 夹具的两个顺序确实相反（否则这两条断言没有分辨力）', ids[0] < ids[7], true)
+      check('★ 时间确实是递增的（新的是 index 大的那条）', stamps[0] < stamps[7], true)
+
+      const listed = await si.listStoredSessions(home, workspace)
+      check('★ 清单条目数就是磁盘上的条目数', listed.length, 8)
+      check(
+        '★ 行序按记录里的 lastPromptAt 倒序（mtime 与 id 顺序都反着放）',
+        JSON.stringify(listed.map((row) => row.sessionId)),
+        JSON.stringify([...ids].reverse()),
+      )
+      check(
+        '★ updatedAt 就是记录里那个毫秒时间戳，不是文件时间',
+        JSON.stringify(listed.map((row) => row.updatedAt)),
+        JSON.stringify([...stamps].reverse()),
+      )
+      check(
+        '★ 记录里的时间不是 1970（mtime 全都落在那里）',
+        listed.every((row) => row.updatedAt > 1_600_000_000_000),
+        true,
+      )
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
+  }
+
+  // ---- 2. 没有 lastPromptAt 时退回 createdAt ------------------------------
+  {
+    const home = makeHome()
+    try {
+      const workspace = join(home, 'dsh_qq')
+      const createdAt = 1_700_000_123_456
+      seedRecorded(
+        home,
+        workspace,
+        'session-dddd4444-dddd4444-x',
+        '',
+        { identity: { cwd: workspace, createdAt }, rows: {} },
+        // mtime 又是一个完全不同的值：读它就得不到那个数字。
+        2_000_000,
+      )
+      const listed = await si.listStoredSessions(home, workspace)
+      check('★ 没有 lastPromptAt 时退回 identity.createdAt', listed[0]?.updatedAt, createdAt)
+      check('★ 那种记录仍然被列出来（只是没有标题）', listed[0]?.title, '')
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
+  }
+
+  // ---- 3. 比较器本身是全序 ------------------------------------------------
+  {
+    const stamp = 1_700_000_000_000
+    const a = { sessionId: 'session-aaaa1111-aaaa1111-x', updatedAt: stamp }
+    const b = { sessionId: 'session-bbbb2222-bbbb2222-x', updatedAt: stamp }
+    check('★ 时间相同则按 sessionId 升序（a 在前）', si.compareSessionsNewestFirst(a, b) < 0, true)
+    check('★ 反向为正在（所以它不是"永远返回 -1"）', si.compareSessionsNewestFirst(b, a) > 0, true)
+    check('★ 同一条与自己比是 0', si.compareSessionsNewestFirst(a, { ...a }), 0)
+    check('★ 新的永远在前，不管 id 谁大', si.compareSessionsNewestFirst({ ...b, updatedAt: stamp + 1 }, a) < 0, true)
+    check('★ 缺 updatedAt 的当成 0（不会因为 NaN 把排序搅乱）', si.compareSessionsNewestFirst({ sessionId: 'x' }, { sessionId: 'y', updatedAt: 1 }), 1)
+    // 反向对照：单键比较器在这里只可能返回 0，于是平手落回输入顺序——那正是要终结的不稳定。
+    check('★ 单键会返回 0 的那一对，全序给出确定答案', si.compareSessionsNewestFirst(a, b) !== 0, true)
+  }
+
+  // ---- 4. 颠倒输入顺序，输出逐字节相同 ------------------------------------
+  {
+    /** 造 90 条会话 / 6 个工作区，每 3 条共用一个时间戳（时间撞车是常态）。 */
+    const workSeconds = 1_786_000_000
+    /** 90 个 id 里最小的那个十六进制值；id 按**倒序**发放。 */
+    const idTop = 89
+    const recordsOf = (workIndex) => {
+      const workspace = join('C:\\work', `ws${String(workIndex)}`)
+      const rows = []
+      for (let local = 0; local < 15; local += 1) {
+        const global = workIndex * 15 + local
+        /*
+         * ⚠️ id 按**倒序**发放（第 0 条拿最大的 id），因为这一节必须能分辨"全序"与"单键"：
+         * 时间撞车的那 3 条在输入里是**降序**的，而全序给出的是**升序**。
+         * 如果 id 顺着输入递增，单键排序（稳定、保留输入顺序）也会印出同一份清单——
+         * 夹具就什么也证明不了（这个坑第一版真踩了）。
+         */
+        const hex = (idTop - global).toString(16).padStart(6, '0')
+        rows.push({
+          id: `session-${hex}-${hex}0000-x`,
+          title: `对话${String(global)}`,
+          // 每三条共享一个时间戳：整个工作区里 15 条只落在 5 个时刻上。
+          // 六个工作区用**同一个**基准秒，好让一个主目录里能装下全部 90 条。
+          at: (workSeconds - Math.floor(local / 3) * 60) * 1000,
+        })
+      }
+      return { workspace, rows }
+    }
+    const works = Array.from({ length: 6 }, (_, index) => recordsOf(index))
+
+    /**
+     * 全序的**定义**，与实现分开写一份：时间倒序，平手按 sessionId 升序。
+     *
+     * 独立写一遍是有意的——用它来断言"磁盘走出来的顺序没有渗进结果"。
+     *
+     * @param rows - 任意顺序的行。
+     */
+    const expectedOrder = (rows) =>
+      [...rows].sort((a, b) => {
+        if (a.at !== b.at) return b.at - a.at
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      })
+
+    /** 只按时间的单键排序——**旧实现**，留作反向对照。 */
+    const singleKeyOrder = (rows) => [...rows].sort((a, b) => b.at - a.at)
+
+    /** 把一个主目录里**全部六个工作区**的会话写进去；`reverse` 决定创建顺序。 */
+    const buildStore = (reverse) => {
+      const home = makeHome()
+      const order = reverse ? [...works].reverse() : works
+      for (const work of order) {
+        const rows = reverse ? [...work.rows].reverse() : work.rows
+        for (const row of rows) {
+          // mtime 给一个与记录无关的值：读它的实现会得到另一份清单。
+          seedRecorded(home, work.workspace, row.id, row.title, promptRecord(work.workspace, row.title, row.at), 1_000_000)
+        }
+      }
+      return home
+    }
+
+    /** 把一次读数拉平成一行，好逐字节比较。 */
+    const flatten = (all) => {
+      const lines = []
+      let count = 0
+      for (const [path, list] of all) {
+        count += list.length
+        lines.push(JSON.stringify([path, list]))
+      }
+      return { count, groups: all.size, bytes: JSON.stringify(lines) }
+    }
+
+    const homes = [buildStore(false), buildStore(true)]
+    try {
+      const draws = []
+      for (const home of homes) draws.push(flatten(await si.listAllStoredSessions(home)))
+
+      check('★ 90 个会话 / 6 个工作区（夹具口径与微信实测一致）', JSON.stringify([draws[0].count, draws[0].groups]), JSON.stringify([90, 6]))
+      check('两份存储（目录创建顺序相反）读数逐字节相同', draws[0].bytes === draws[1].bytes, true)
+      check('倒着建目录的那一份也读到 90 条', draws[1].count, 90)
+
+      /*
+       * `/list` 真正走的是逐工作区那条路，所以每个工作区单独再读一次。
+       * 断言分成两半：**行序等于定义**，以及**重复读逐字节相同**。
+       */
+      const first = []
+      for (const work of works) {
+        const listed = await si.listStoredSessions(homes[0], work.workspace)
+        first.push(JSON.stringify(listed))
+        check(
+          `★ 工作区 ${work.workspace} 的行序就是全序定义（走的目录顺序没有渗进来）`,
+          JSON.stringify(listed.map((row) => row.sessionId)),
+          JSON.stringify(expectedOrder(work.rows).map((row) => row.id)),
+        )
+      }
+      const again = []
+      for (const work of works) {
+        again.push(JSON.stringify(await si.listStoredSessions(homes[0], work.workspace)))
+      }
+      check('★ 同一个工作区读两次，逐字节相同', first.join('|') === again.join('|'), true)
+      const reversedHomes = []
+      for (const work of works) {
+        reversedHomes.push(JSON.stringify(await si.listStoredSessions(homes[1], work.workspace)))
+      }
+      check('★ 倒着建目录的那份存储，逐工作区读数逐字节相同', first.join('|') === reversedHomes.join('|'), true)
+
+      // 时间撞车确实发生了，否则这一节什么也没验到。
+      const collision = await si.listStoredSessions(homes[0], works[0].workspace)
+      const distinct = new Set(collision.map((row) => row.updatedAt)).size
+      check('★ 15 条会话只落在 5 个时间戳上（撞车是常态，不是假设）', distinct, 5)
+      check('★ 清单整体仍按时间倒序', collision[0].updatedAt > collision[14].updatedAt, true)
+      check('★ 时间一律是记录里的毫秒值（没有一条落回 1970）', collision.every((row) => row.updatedAt > 1_700_000_000_000), true)
+
+      /*
+       * ★ 反向对照：**同一份 15 条数据，把输入数组整个倒过来再排序，输出必须逐字节相同。**
+       *
+       * 这一条才是"全序"的真正判据，而且它是**可判定的**——上一版这里做的是
+       * "把目录创建顺序倒过来"，那个实验在 NTFS 上什么都证明不了：探针实测
+       * `readdirSync` 给出的是**字典序**（创建 d b f a e c，读回来 a b c d e f），
+       * 于是"走目录顺序"与"按 sessionId 升序"是同一个顺序，
+       * 单键排序也会通过。
+       */
+      const rowObjects = works[0].rows.map((row) => ({ sessionId: row.id, updatedAt: row.at }))
+      const ascending = [...rowObjects].sort(si.compareSessionsNewestFirst)
+      const descending = [...rowObjects].reverse().sort(si.compareSessionsNewestFirst)
+      check('★ 输入倒序后排序结果逐字节相同（全序的直接判据）', JSON.stringify(ascending), JSON.stringify(descending))
+      check(
+        '★ 而且这个结果就是全序定义（不是"两次都一样地错"）',
+        JSON.stringify(ascending.map((row) => row.sessionId)),
+        JSON.stringify(expectedOrder(works[0].rows).map((row) => row.id)),
+      )
+
+      /*
+       * ★ 反向对照的**前提**：单键排序在这份夹具上确实给出另一份清单。
+       *
+       * 没有这一条，上面那些"逐字节相同"完全可能因为输入本来就同序而永远为真。
+       */
+      const naive = singleKeyOrder(works[0].rows).map((row) => row.id)
+      check('★ 单键排序（旧实现）在这份夹具上确实给出**不同**的行序', naive.join(',') !== ascending.map((row) => row.sessionId).join(','), true)
+      check(
+        '★ 单键排序把平手留给了输入顺序（同一个库两次印出不同清单的机制）',
+        singleKeyOrder(works[0].rows).map((row) => row.id).join(',') ===
+          singleKeyOrder([...works[0].rows].reverse()).map((row) => row.id).join(','),
+        false,
+      )
+    } finally {
+      for (const home of homes) rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
+  }
+}
+
+/*
+ * ---- 归档 / 会话在磁盘上不存在 → 消息静默消失 ------------------------------
+ *
+ * 钉的是这么一件事：**归档不是磁盘标记**。被归档的会话还在磁盘上，`prompt` 照常"接受"，
+ * 随后壳的归档门卫在 `agent/pre-step` **静默 reject**，回合以 `blocked` 结束——
+ * 没有错误、没有日志、用户什么都没收到。磁盘上已经没有的会话同理。
+ * 所以 `#submit` 不会失败 → 不会回"没能把消息交给会话" → 和微信一样**全程静默**。
+ *
+ * 修法是路由在**复用既有绑定之前**问一句（探针可选），不可用就新建 + 改绑 + 回一句话。
+ *
+ * ⚠️ 这一节能证明的只有"路由的判定与动作符合微信的契约"。
+ * **真机上"归档一条真实会话之后消息是否被正确换绑"没有验证过**——那要有运行中的 DSH，
+ * 而且会动到真实会话，只能由用户实测。
+ */
+{
+  const r = await import('../lib/router.js')
+
+  const CONV = { conversationId: '111:peer', accountId: '111', peerId: 'peer' }
+  const OLD = 'session-e716f0aa-e716f0aa-47fd'
+  const OLD_TITLE = 'QQ e716f0'
+
+  /**
+   * 一个只有一条绑定的假宿主。
+   *
+   * `state` 是探针的答案；不给 `state` 就是**没有探针**（可选能力的缺席）。
+   * `throws` 让探针抛错。
+   *
+   * `heal` = 探针只对**原来那条**会话给 `state`，新建出来的会话一律报 `usable`——
+   * 那是真实宿主的行为（新会话没被归档），也是"搬一次家就够"的前提。
+   * 不开 `heal` 时探针对谁都说 `state`，于是每来一条消息就再搬一次：
+   * 那是宿主**自相矛盾**的答案，不是路由的死循环，所以那个形状单独断言。
+   */
+  const harness = ({ state, throws = false, ageMs = 0, withProbe = true, heal = true } = {}) => {
+    const calls = []
+    let bindings = {
+      [CONV.conversationId]: {
+        conversationId: CONV.conversationId,
+        accountId: CONV.accountId,
+        peerId: CONV.peerId,
+        sessionId: OLD,
+        title: OLD_TITLE,
+        createdAt: Date.now() - ageMs,
+        lastUsedAt: Date.now() - ageMs,
+      },
+    }
+    const gateway = {
+      createSession: async (sessionId) => calls.push(['createSession', sessionId]),
+      // 采纳那条路必须**不被走到**：定死的绑定被换掉之后不该再去 ensure 旧会话。
+      ensureSession: async (sessionId) => calls.push(['ensureSession', sessionId]),
+      prompt: async () => {},
+      cancel: async () => {},
+      listSessions: async () => [],
+      listOwnSessions: async () => [],
+      listModels: async () => [],
+      currentModel: async () => undefined,
+      selectModel: async () => {
+        throw new Error('这一节不测模型')
+      },
+      ...(withProbe
+        ? {
+            sessionState: async (sessionId) => {
+              calls.push(['sessionState', sessionId])
+              if (throws) throw new Error('探针炸了')
+              if (heal && sessionId !== OLD) return 'usable'
+              return state
+            },
+          }
+        : {}),
+    }
+    const lines = []
+    const router = new r.SessionRouter({
+      gateway,
+      store: {
+        load: async () => bindings,
+        save: async (next) => {
+          bindings = next
+        },
+      },
+      titlePrefix: 'QQ',
+      onDiagnostic: (line) => lines.push(line),
+    })
+    return {
+      router,
+      calls,
+      lines,
+      /** 现在落盘的绑定。 */
+      binding: () => bindings[CONV.conversationId],
+      route: (text) => router.route({ ...CONV, text }),
+    }
+  }
+
+  // ---- 1. 没有探针：行为与加它之前完全一样，绝不换绑 ----------------------
+  {
+    const h = harness({ withProbe: false })
+    const routed = await h.route('你好')
+    check('★ 宿主没有探针时不换绑（消息照旧交给原来那条会话）', routed.decision.sessionId, OLD)
+    check('★ 也不建新会话', h.calls.filter(([name]) => name === 'createSession').length, 0)
+    check('★ 没有探针不是错误，但也没换绑（notice 不该出现）', routed.decision.notice, undefined)
+    check('★ 复用走的还是 ensureSession（旧行为）', JSON.stringify(h.calls.filter(([name]) => name === 'ensureSession')), JSON.stringify([['ensureSession', OLD]]))
+    check('落盘的绑定仍指着旧会话', h.binding().sessionId, OLD)
+  }
+
+  // ---- 2. 探针抛错：一律按 usable，绝不换绑 ------------------------------
+  {
+    const h = harness({ throws: true })
+    const routed = await h.route('你好')
+    check('★ 探针抛错时不换绑（坏探针不能弄丢消息）', routed.decision.sessionId, OLD)
+    check('★ 抛错时也不建新会话', h.calls.filter(([name]) => name === 'createSession').length, 0)
+    check('★ 抛错必须留下日志（不许静默）', h.lines.some((line) => line.includes('探针失败') && line.includes(OLD)), true)
+    check('★ 日志里写明"按可用处理"', h.lines.some((line) => line.includes('按可用处理')), true)
+    check('抛错的处理方式就是复用旧会话', JSON.stringify(h.calls.filter(([name]) => name === 'ensureSession')), JSON.stringify([['ensureSession', OLD]]))
+    check('落盘的绑定仍指着旧会话', h.binding().sessionId, OLD)
+  }
+
+  // ---- 3. usable：什么都不做 ---------------------------------------------
+  {
+    const h = harness({ state: 'usable' })
+    const routed = await h.route('你好')
+    check('usable 时复用绑定', routed.decision.sessionId, OLD)
+    check('usable 时没有 notice', routed.decision.notice, undefined)
+    check('usable 时探针确实被问过', JSON.stringify(h.calls.filter(([name]) => name === 'sessionState')), JSON.stringify([['sessionState', OLD]]))
+  }
+
+  // ---- 4. archived：立即换绑，而且不受宽限期约束 --------------------------
+  {
+    // 年龄为 0：如果宽限期被错误地套用到 archived 上，这一条会失败。
+    const h = harness({ state: 'archived', ageMs: 0 })
+    const routed = await h.route('你好')
+    check('★ archived 立即换绑（哪怕绑定是刚建的）', routed.decision.sessionId !== OLD, true)
+    check('★ 换绑后用户收到一句话（不许静默换掉对话）', typeof routed.decision.notice === 'string' && routed.decision.notice !== '', true)
+    check('★ 那句话说明旧对话是被归档了', routed.decision.notice.includes('已经被归档'), true)
+    check('★ 那句话点名旧标题（用户才认得出被落下的是哪个）', routed.decision.notice.includes(OLD_TITLE), true)
+    check('★ 落盘的绑定指着新会话（否则下一条又落回归档的会话）', h.binding().sessionId, routed.decision.sessionId)
+    check('★ 日志里有 state=archived、旧 id、新 id', h.lines.some((line) => line.includes('state=archived') && line.includes(OLD) && line.includes(routed.decision.sessionId)), true)
+    check('★ 换绑走的是 createSession 而不是 ensureSession（旧会话已被放弃）', h.calls.filter(([name]) => name === 'ensureSession').length, 0)
+    check('新会话确实被创建过', JSON.stringify(h.calls.filter(([name]) => name === 'createSession').map(([, id]) => id)), JSON.stringify([routed.decision.sessionId]))
+    check('created 标记为真（这一条消息开启了新会话）', routed.decision.created, true)
+  }
+
+  // ---- 5. ⭐ missing 的宽限期：满 2 分钟才信 ------------------------------
+  {
+    // 刚建好的绑定 + missing，就是"新会话的首轮还没写下记录"——信它会造成无限新建循环。
+    const young = harness({ state: 'missing', ageMs: 0 })
+    const youngRouted = await young.route('你好')
+    check('★ missing 在宽限期内**不**换绑（这就是无限新建循环的坑）', youngRouted.decision.sessionId, OLD)
+    check('★ 宽限期内也不建新会话', young.calls.filter(([name]) => name === 'createSession').length, 0)
+    check('★ 宽限期内没有 notice（对话没有搬家）', youngRouted.decision.notice, undefined)
+    check('★ 宽限期内必须留下日志（能据此排掉"为什么没换"）', young.lines.some((line) => line.includes('missing') && line.includes(OLD) && line.includes('宽限')), true)
+
+    // 只差一点点：1 分 59 秒，仍然不换。
+    const almost = harness({ state: 'missing', ageMs: r.MISSING_BINDING_GRACE_MS - 1000 })
+    check('★ 还差一秒也不换绑（边界是"满"两分钟）', (await almost.route('你好')).decision.sessionId, OLD)
+
+    // 满 2 分钟：这次要换。
+    const old = harness({ state: 'missing', ageMs: r.MISSING_BINDING_GRACE_MS })
+    const oldRouted = await old.route('你好')
+    check('★ missing 满宽限期后换绑', oldRouted.decision.sessionId !== OLD, true)
+    check('★ 换绑后同样回一句话', typeof oldRouted.decision.notice === 'string' && oldRouted.decision.notice !== '', true)
+    check('★ 那句话说的是"在电脑上已经不存在了"（与归档区分开）', oldRouted.decision.notice.includes('在电脑上已经不存在了'), true)
+    check('★ 落盘的绑定指着新会话', old.binding().sessionId, oldRouted.decision.sessionId)
+    check('★ 日志里有 state=missing', old.lines.some((line) => line.includes('state=missing')), true)
+    check('宽限期本身是 2 分钟', r.MISSING_BINDING_GRACE_MS, 2 * 60 * 1000)
+  }
+
+  // ---- 6. 换绑之后再来的消息：新会话可用就不必再搬 ------------------------
+  {
+    const h = harness({ state: 'archived', ageMs: 10 * 60 * 1000 })
+    const first = await h.route('第一条')
+    const second = await h.route('第二条')
+    check('★ 连着两条消息只搬一次家（第二条落在新会话上）', second.decision.sessionId, first.decision.sessionId)
+    check('★ 第二条没有重复回那句提示（搬过一次就不再啰嗦）', second.decision.notice, undefined)
+    check('★ 探针被问了两次（每次复用都问）', h.calls.filter(([name]) => name === 'sessionState').length, 2)
+    check('旧会话只被问过一次（换掉之后不再问它）', h.calls.filter(([name, id]) => name === 'sessionState' && id === OLD).length, 1)
+
+    /*
+     * 反向对照：宿主对**刚新建的**会话也答 `archived` 时，路由会继续搬。
+     *
+     * 这是宿主自相矛盾（它让频道建了一条它自己判定不可用的会话），路由的职责是**照它的答案办**，
+     * 而不是自己发明一条"搬过一次就不再信探针"的规则——那条规则会把真正的归档漏掉。
+     * 单独钉住这个形状，是为了说明第 6 节上面那两条断言测的是"新会话可用"，
+     * **不是**"路由会自我克制"。
+     */
+    const stubborn = harness({ state: 'archived', ageMs: 10 * 60 * 1000, heal: false })
+    const movedOnce = await stubborn.route('甲')
+    const movedTwice = await stubborn.route('乙')
+    check('★ 宿主对新会话也答 archived 时，路由照它的话继续搬（不自己发明克制规则）', movedTwice.decision.sessionId !== movedOnce.decision.sessionId, true)
+  }
+
+  /*
+   * ---- 7. ⭐ 反向对照的前提：宽限期这条断言真的有分辨力 --------------------
+   *
+   * 上面第 5 条只有在这个前提下才有意义：把宽限期拿掉（等价于第一版"只对 missing 换新"的
+   * 实现），同一个夹具**必须**换绑。这里用一个"年龄 0"的夹具直接证明那个差别存在，
+   * 免得宽限期那条断言其实在测一个无论怎样都成立的恒等式。
+   */
+  {
+    const young = harness({ state: 'missing', ageMs: 0 })
+    const probeSays = await young.router.route({ ...CONV, text: '你好' })
+    const firstId = probeSays.decision.sessionId
+    // 没有宽限期的实现会在这里换绑；有宽限期的实现在这里复用。
+    check('★ 年龄 0 的绑定：有宽限期时**不**换（对照第 5 条的年龄满 2 分钟时会换）', firstId, OLD)
+    const aged = harness({ state: 'missing', ageMs: r.MISSING_BINDING_GRACE_MS + 1 })
+    check('★ 同一个夹具只把年龄推过宽限期，结果就反过来（所以宽限期确实在起作用）', (await aged.route('你好')).decision.sessionId !== OLD, true)
+  }
+
+  /*
+   * ---- 8. ⭐ 运行时那一层：真网关的探针 + 回话真的发出去了 -----------------
+   *
+   * 上面 1–7 节测的是路由（假宿主）。这一节把**真的 `QqRuntime`** 跑起来，
+   * 让入站消息走完整条链：`#handleInbound` → `#deliverPrompt` → 真网关的 `sessionState`
+   * （真的读磁盘）→ 路由换绑 → `#send` 把那句话发出去。
+   *
+   * 要证明的是"**换绑之后确实回了话**"——只断言 `decision.notice` 存在并不够，
+   * 它完全可能被丢在运行时那一层、谁也没发。
+   *
+   * ⚠️ 仍然是**离线**的：QQBot 的连接与发送都被换成了假的，没有任何网络。
+   */
+  {
+    const { mkdtempSync, rmSync, readFileSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { QQBot } = await import('@tencent-connect/qqbot-nodejs')
+    const { QqRuntime } = await import('../lib/runtime.js')
+
+    const home = mkdtempSync(join(tmpdir(), 'dsh-qq-notice-'))
+    const sent = []
+    const prompts = []
+    const sessions = []
+    /** 真的 QQBot 实例挂上的事件处理器，按事件名收在这里。 */
+    const botListeners = new Map()
+    const realStart = QQBot.prototype.start
+    const realSendText = QQBot.prototype.sendText
+    const realOn = QQBot.prototype.on
+    try {
+      /*
+       * 假的连接、假的发送、以及**把事件处理器截下来**：只记录，不出网。
+       *
+       * 三个都打在**原型**上，因为真的 `QQBot` 是 `start()` 内部自己 new 出来的
+       * （runtime.js 的 `const bot = new QQBot({...})`），测试拿不到那个构造点。
+       * 实例方法会遮蔽原型方法，所以这个替换对那一个实例同样生效。
+       */
+      QQBot.prototype.start = async function start() {
+        return undefined
+      }
+      QQBot.prototype.sendText = async function sendText(target, text) {
+        sent.push({ target, text })
+        return {}
+      }
+      QQBot.prototype.on = function on(event, listener) {
+        const list = botListeners.get(event) ?? []
+        list.push(listener)
+        botListeners.set(event, list)
+        return this
+      }
+
+      const STALE = 'session-aaaabbbb-aaaabbbb-0000'
+      /*
+       * 两件事都要给对，否则这条链第一句就抛，而抛出的东西与被测行为**毫无关系**：
+       *
+       * - `sessionController` 走的是**属性**访问（`this.#ctx.sessionController.create/prompt`），
+       *   不是 `ctx.get`。第一次跑这一节就红在这里。
+       * - `workspaceRegistry` 走 `safeGet`（即 `ctx.get`），换绑要经
+       *   `createSession` → `#adoptSession` → `#workspaceIdFor` → `resolveByPath` / `create`。
+       */
+      const sessionController = {
+        create: async (request) => sessions.push(request),
+        prompt: async (request) => prompts.push(request),
+        cancel: async () => {},
+        rename: async () => {},
+      }
+      const ctx = {
+        sessionController,
+        get: (name) => {
+          if (name === 'workspaceRegistry') {
+            return {
+              resolveByPath: async (path) => ({ id: `ws-${path}`, title: '', setTitle: async () => {} }),
+              create: async (path) => ({ id: `ws-${path}`, title: '', setTitle: async () => {} }),
+            }
+          }
+          return undefined
+        },
+      }
+      const runtime = new QqRuntime(ctx, {
+        home,
+        stateFile: join(home, 'state.json'),
+        workspace: join(home, 'dsh_qq'),
+        credentials: {
+          available: true,
+          save: async () => ({}),
+          load: async (appId) => ({ appId, appSecret: 'secret' }),
+          remove: async () => {},
+          describe: async () => ({ configured: true }),
+        },
+      })
+      /*
+       * 盘上放一条**已经过了宽限期**、而磁盘上根本不存在的绑定——
+       * 那就是"会话在电脑上已经不存在了"这条故障路径的等价物。
+       */
+      await runtime.store.update((next) => {
+        next.accounts['111'] = { userOpenid: 'peer', enabled: true, boundAt: Date.now() }
+        next.bindings['111:peer'] = {
+          conversationId: '111:peer',
+          accountId: '111',
+          peerId: 'peer',
+          sessionId: STALE,
+          title: 'QQ aaaabb',
+          createdAt: Date.now() - r.MISSING_BINDING_GRACE_MS - 60_000,
+          lastUsedAt: Date.now(),
+        }
+      })
+
+      await runtime.start('111')
+      // `start` 里有几件 `#fire` 出去的异步活，先让它们落定。
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      check('前置：连接已经建立（否则这一节什么都没测）', runtime.connected, true)
+      const listeners = botListeners.get('message') ?? []
+      check('前置：入站消息的处理器挂上了', listeners.length, 1)
+
+      sent.length = 0
+      const messageEvent = { kind: 'c2c', senderId: 'peer', messageId: 'm-1', content: '你好' }
+      for (const listener of listeners) await listener({}, messageEvent)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      const notice = sent.find(({ text }) => typeof text === 'string' && text.includes('在电脑上已经不存在了'))
+      check('★ 运行时确实把那句话发出去了（不是只放在 decision 里）', notice !== undefined, true)
+      check('★ 那句话点名了旧标题', String(notice?.text).includes('QQ aaaabb'), true)
+      check('★ 那句话说明已经新建并接上', String(notice?.text).includes('我已新建'), true)
+
+      const state = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
+      const rebound = state.bindings['111:peer']
+      check('★ 换绑落盘了（下一条消息不会又落进那条不存在的会话）', rebound.sessionId !== STALE, true)
+      check('★ 提示词交给的是**新**会话（用户刚发的内容没有丢）', prompts.length === 1 && prompts[0].sessionId === rebound.sessionId, true)
+      check('★ 提交过去的正文就是用户那句话', String(prompts[0]?.content?.[0]?.text).includes('你好'), true)
+      check('★ 新会话确实被交给宿主创建过（换绑不是只在本地改了个 id）', sessions.length === 1 && sessions[0].sessionId === rebound.sessionId, true)
+    } finally {
+      QQBot.prototype.start = realStart
+      QQBot.prototype.sendText = realSendText
+      QQBot.prototype.on = realOn
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
+  }
+}
+
 // ---- 审批与提问的文本解析（"否定优先"是最易写错的一条）--------------------
 {
   const ia = await import('../lib/interactions.js')
@@ -1886,7 +2522,13 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     {
       const { mkdirSync: mkdirSeed, writeFileSync: writeSeed, utimesSync } = await import('node:fs')
       const si = await import('../lib/session-index.js')
-      /** 造一条"存储里真的有"的会话；`at` 决定排序（mtime 就是清单用的时间）。 */
+      /**
+       * 造一条"存储里真的有"的会话；`at` 决定排序。
+       *
+       * ⚠️ `at` 写进**记录里的** `sessionListMetadata.lastPromptAt`，那是清单真正读的时间。
+       * 文件的 mtime 一并按 `at` 打上，好让这一节的语义与旧版一致；但**判据是记录**——
+       * 改回 mtime 的清单在这里就会读不到时间。
+       */
       const seedSession = (id, cwd, title, at) => {
         const sessionDir = join(dir, 'sessions', si.encodeWorkspaceDir(cwd), id)
         mkdirSeed(sessionDir, { recursive: true })
@@ -1897,7 +2539,12 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
         mkdirSeed(indexDir, { recursive: true })
         writeSeed(
           join(indexDir, `${id}.json`),
-          JSON.stringify({ record: { rows: { title: { val: title } }, identity: { cwd } } }),
+          JSON.stringify({
+            record: {
+              rows: { title: { val: title }, sessionListMetadata: { val: { lastPromptAt: at } } },
+              identity: { cwd, createdAt: at },
+            },
+          }),
           'utf8',
         )
       }
