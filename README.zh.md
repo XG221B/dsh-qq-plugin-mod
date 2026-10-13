@@ -177,11 +177,13 @@ dsh plugin --profile desktop add C:\path\to\dsh-qq
 
 ### 设置
 
-**设置 → QQ**，分四个分组：
+**设置 → QQ**，按页面上的顺序一共六组：
 
+- **帮助** —— 页面上那个「打开使用手册」按钮，打开的是用户手册（`docs/HANDBOOK-USER.md`，指令与设置项都以它为准）
 - **连接** —— 通道开关、扫码绑定、已绑定账号、解绑
-- **权限** —— QQ 会话的权限预设（`auto` 是唯一还会弹审批提示的那个）
+- **权限** —— QQ 会话的权限预设（只有 `auto` 和「跟随 DSH 设置：和桌面端一样」还可能弹审批提示）
 - **行为设置** —— 见下表
+- **指令** —— 页面上印的斜杠指令速查（`/help`、`/new`、`/list`、`/switch`、`/current`、`/cancel`、`/model`）
 - **诊断** —— 日志尾、工作区路径、会话数、待处理交互
 
 一共九个设置项：
@@ -278,6 +280,7 @@ dsh plugin --profile desktop add C:\path\to\dsh-qq
 
 | | |
 |---|---|
+| [docs/HANDBOOK-USER.md](docs/HANDBOOK-USER.md) | 用户手册——设置页那个帮助按钮打开的就是它，指令与设置项都以它为准（中文） |
 | [docs/POSTMORTEM.md](docs/POSTMORTEM.md) | 每一个真实踩过的坑——每一条都付了代价，也每一条都是一个检查器存在的理由（中文） |
 | [docs/SETTINGS-CONTRACT.md](docs/SETTINGS-CONTRACT.md) | 设置页背后的宿主／客户端路由契约，逐条读自真实调用点（中文） |
 | [docs/RELEASING.md](docs/RELEASING.md) | 一次版本怎么发：tag、OIDC，以及一次性的 Trusted Publisher 配置（中文） |
@@ -296,17 +299,31 @@ node scripts/verify-client.mjs   # 客户端注册形状（不是视觉验证）
 node scripts/verify-send-path.mjs  # 发送路径，跑在假 SDK 上
 ```
 
-**593** 项宿主侧检查、**41** 项客户端检查、**60** 项发送路径检查。
+**770** 项宿主侧检查、**108** 项客户端检查、**60** 项发送路径检查。
+
+这三个数字是**从上面那几条命令的实际输出里读出来的，不是手打的**：
+`tools/check-doc-counts.mjs` 拿它们和脚本真正打印的数比，对不上时 CI 会失败并点名是哪个文件。
+改了测试就改这里的数字，否则这道闸会拦住构建。
 
 ### 常设检查器
 
-`tools/` 里有三个检查器，每一个都对应一次真实事故，改动前请先跑：
+`tools/` 里有四个检查器，每一个都对应一次真实事故，改动前请先跑：
 
 ```bash
 node tools/check-unbound.mjs .          # 用了但没导入
 node tools/check-unused-imports.mjs .   # 导入了但没用
+node tools/check-doc-counts.mjs --run   # 文档里的测试数量，以及 publish.yml 里的仓库名
 node tools/check-cross-plugin.mjs <profileDir>   # 跨插件共享资源
 ```
+
+`check-doc-counts.mjs` 从三个测试套件的**实际输出**里读出那三个数，再和本文件、`README.md`、
+`docs/RELEASING.md` 里写的比，对不上就点名是哪个文件、写的多少、实际多少。CI 里它读的是三个
+测试步骤已经落盘的输出，所以只多花一秒，而不是再跑一遍。`--run` 是本机用法：它自己把套件跑一次。
+
+它还顺带核对第二样东西，理由相同：`publish.yml` 文件头那四个 Trusted Publisher 字段也是手抄的，
+抄错的表现**只是发布时 403**，所以它拿那一块和 `package.json`（属主与仓库名）、工作流自己的
+文件名与 `name:`、以及两版 README 的 CI 徽章逐个比。这里曾经写着 `dsh-qq`，而其它每一处都是
+`dsh-qq-plugin`——这道闸就是为那次而加的。
 
 `check-cross-plugin.mjs` 是**本地检查，不进 CI**：它要读一个真实的 DSH profile——
 `dsh.profile.bundles` 那份列表，以及该 profile `node_modules` 下已装好的插件——
@@ -317,7 +334,10 @@ CI 的 runner 上两样都没有。它查的是所有插件共用的两样东西
 **每个检查器都带反向对照**：它必须能抓住它为之而写的那次故障，抓不住就判定为不可信并以
 非零码退出。一个永远报「通过」的检查器，比没有检查器更糟——它让人以为已经验过了。
 
-`smoke/` 下的脚本需要真实凭据和真实机器人，所以同样**不进 CI**。
+`smoke/` 里两个探针（`step3-probe.mjs`、`step4-probe.mjs`）连的是腾讯的线上服务，需要真实凭据与
+真实机器人；另外两个（`step4-surface.mjs`、`check-sdk-surface.mjs`）是离线表面核对，凭据和网络都不
+需要。四个**都不进 CI**——两个探针是因为凭据不该出现在公开仓库的 CI 里，两个表面核对是因为它们是
+一次性的调研脚本，只打印观察结果、不做通过/失败判定。
 
 ## 许可
 

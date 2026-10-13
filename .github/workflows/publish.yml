@@ -29,12 +29,19 @@
 # matched literally; a typo in any of them shows up as a 403 at publish time and as nothing else.
 #
 #   Organization or user : xcisxc29
-#   Repository           : dsh-qq
+#   Repository           : dsh-qq-plugin
 #   Workflow filename    : publish.yml
 #   Environment          : (leave empty — this workflow declares none)
 #
 # The workflow filename is the file's name, not its path: `publish.yml`, not
 # `.github/workflows/publish.yml`. That is the single most common way to get this wrong.
+#
+# A typo in this block no longer waits for the 403 to show itself: `tools/check-doc-counts.mjs` —
+# which the gate below runs — reads the block back and compares the organization and the repository
+# against `package.json`, the workflow filename against this file's own name, the environment against
+# this workflow declaring none, and the `Actions → …` line below against the `name:` this workflow
+# actually carries. A mismatch turns into a red step naming the line that disagrees, and this block is
+# the only copy of those four fields that is compared — so do not retype them anywhere else either.
 #
 # ## Prerequisites
 #
@@ -84,6 +91,13 @@ jobs:
       # back, the release path cannot rely on the CI run that happened to be green on some earlier
       # commit; it verifies the exact tree the tag points at. `tools/check-cross-plugin.mjs` and
       # `smoke/` are absent for the same reason they are absent from CI — see .github/workflows/ci.yml.
+      #
+      # "The same gate" is meant literally: the steps below are CI's steps, in CI's order and in
+      # CI's shape, so the two files can be read side by side. The three test steps each tee their
+      # output to `$RUNNER_TEMP/dsh-qq-doc-counts/` precisely because the documented-counts step
+      # reads those logs instead of re-running the suites — without the tee it fails on a missing
+      # log, not on a wrong number. A release gate weaker than CI's would be backwards: publishing
+      # is the only action in this repository that cannot be undone.
       - name: Syntax-check every source file
         shell: bash
         run: |
@@ -100,10 +114,37 @@ jobs:
           echo "parsed $count .js/.mjs files"
 
       - name: Host-side checks
-        run: node scripts/verify.mjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-qq-doc-counts"
+          node scripts/verify.mjs 2>&1 | tee "$RUNNER_TEMP/dsh-qq-doc-counts/verify.mjs.out"
+
+      # The send path is the one piece of logic whose failure is silent, and `verify.mjs` cannot
+      # reach it because it needs a bot; `verify-send-path.mjs` substitutes one through a module
+      # resolution hook. It ran in CI only, which is how a release could be gated by a strictly
+      # weaker set of checks than a pull request.
+      - name: Send-path checks (fake transport, real plugin)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-qq-doc-counts"
+          node scripts/verify-send-path.mjs 2>&1 | tee "$RUNNER_TEMP/dsh-qq-doc-counts/verify-send-path.mjs.out"
 
       - name: Client-side checks
-        run: node scripts/verify-client.mjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dsh-qq-doc-counts"
+          node scripts/verify-client.mjs 2>&1 | tee "$RUNNER_TEMP/dsh-qq-doc-counts/verify-client.mjs.out"
+
+      # The numbers printed in README.md, README.zh.md and docs/RELEASING.md are typed by hand.
+      # Release is where a stale one matters most, so the same comparison CI runs runs here, against
+      # the logs the three steps above just wrote. The same checker also compares this file's
+      # Trusted Publisher block with `package.json` — the four fields a user copies by hand, whose
+      # only other symptom is a 403 during the publish below.
+      - name: The documented counts match the run, and the workflow names the real repository
+        run: node tools/check-doc-counts.mjs --logs "$RUNNER_TEMP/dsh-qq-doc-counts"
 
       - name: No name is used without being imported
         run: node tools/check-unbound.mjs .

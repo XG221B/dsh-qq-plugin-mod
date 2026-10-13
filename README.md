@@ -191,12 +191,16 @@ succeeded or failed.
 
 ### Settings
 
-**Settings → QQ**, in four groups:
+**Settings → QQ**, in six groups, in the order the page renders them:
 
+- **帮助 (Help)** — the one button on the page that opens the user handbook
+  (`docs/HANDBOOK-USER.md`, the file that lists every command and every setting)
 - **连接 (Connection)** — channel on/off, the QR bind, the bound account, unbind
-- **权限 (Permissions)** — the permission preset for QQ conversations (`auto` is the only one that
-  still shows approval prompts)
+- **权限 (Permissions)** — the permission preset for QQ conversations (only `auto` and
+  «Follow the DSH setting, same as the desktop» can still show approval prompts)
 - **行为设置 (Behaviour)** — the table below
+- **指令 (Commands)** — the slash-command reference the page prints (`/help`, `/new`, `/list`,
+  `/switch`, `/current`, `/cancel`, `/model`)
 - **诊断 (Diagnostics)** — log tail, workspace path, conversation count, pending interactions
 
 Nine settings in total:
@@ -301,6 +305,7 @@ the stricter rule, where only the bound session may send.
 
 | | |
 |---|---|
+| [docs/HANDBOOK-USER.md](docs/HANDBOOK-USER.md) | The user handbook — what the page's one help button opens, and the file that lists every command and every setting (Chinese) |
 | [docs/POSTMORTEM.md](docs/POSTMORTEM.md) | Every real failure met while building this — each one cost something, and each one is why a checker exists (Chinese) |
 | [docs/SETTINGS-CONTRACT.md](docs/SETTINGS-CONTRACT.md) | The host/client route contract behind the settings page, read off the actual call sites (Chinese) |
 | [docs/RELEASING.md](docs/RELEASING.md) | How a version gets published: the tag, OIDC, and the one-time Trusted Publisher setup (Chinese) |
@@ -319,18 +324,36 @@ node scripts/verify-client.mjs   # client registration shape (not a visual check
 node scripts/verify-send-path.mjs  # the send path, against a fake SDK
 ```
 
-**593** host checks, **41** client checks, **60** send-path checks.
+**770** host checks, **108** client checks, **60** send-path checks.
+
+Those three numbers are **read out of the runs above, not typed by hand**: `tools/check-doc-counts.mjs`
+compares them against what the scripts actually print, and the CI job fails naming the file if any of
+them disagrees. Change a test and the number here, or the gate stops the build.
 
 ### Standing checkers
 
-Three checkers live in `tools/`. Each one corresponds to a real incident, so run them before
+Four checkers live in `tools/`. Each one corresponds to a real incident, so run them before
 committing:
 
 ```bash
 node tools/check-unbound.mjs .          # used but never imported
 node tools/check-unused-imports.mjs .   # imported but never used
+node tools/check-doc-counts.mjs --run   # the documented counts, and the repository name in publish.yml
 node tools/check-cross-plugin.mjs <profileDir>   # shared resources across plugins
 ```
+
+`check-doc-counts.mjs` reads the three numbers out of the **actual output** of the three suites and
+compares them against this file, `README.zh.md` and `docs/RELEASING.md`, naming the file, the number
+written and the number measured when they disagree. In CI it reads the output the three test steps
+captured, so it costs a second rather than a second full run. `--run` is the local form: it runs the
+suites once itself.
+
+It carries a second job, for the same reason: the four Trusted Publisher fields in
+`publish.yml`'s header are typed by hand and a typo in them shows up as **a 403 at publish time and
+as nothing else**, so the checker compares that block against `package.json` (organization and
+repository), the workflow's own filename and its `name:`, and both READMEs' CI badges. The
+repository it names was once `dsh-qq` while every other copy said `dsh-qq-plugin` — that is the
+failure this half exists to catch.
 
 `check-cross-plugin.mjs` is a **local check and does not run in CI**: it reads a real DSH profile —
 the `dsh.profile.bundles` list and the plugins installed under that profile's `node_modules` — and a
@@ -342,8 +365,12 @@ one plugin collides with another's) and **host tool names**, which are globally 
 declared untrustworthy and exits non-zero. A checker that always prints "pass" is worse than no
 checker at all — it makes people believe something was verified.
 
-The smoke scripts under `smoke/` need real credentials and a real bot, so they are **not in CI**
-either.
+Two probes under `smoke/` (`step3-probe.mjs` and `step4-probe.mjs`) talk to Tencent's live service
+and need real bot credentials; the other two (`step4-surface.mjs` and `check-sdk-surface.mjs`) are
+offline surface checks that need neither credentials nor a network. None of the four is **in CI** —
+the two probes because credentials do not belong in a public repository's CI, the two surface
+checks because they are one-off research probes that print observations rather than assert
+pass/fail.
 
 ## Licence
 

@@ -595,6 +595,54 @@ const unused = zhKeys.filter((key) => !usedKeys.includes(key))
 equal('no copy key is declared and never read', unused, [])
 console.log(`      (${usedKeys.length} copy keys read by the component)`)
 
+/*
+ * The command card — the one place on the page that teaches the slash commands.
+ *
+ * The router's three `COMMANDS_*` lists are the only authority on which commands exist
+ * (`verify.mjs` reads the same three lists to check the handbook), so the page and the router are a
+ * pair and this is a two-directional check on the client side: a command the router accepts but the
+ * card omits is one a user cannot discover from the page. `/model` sat exactly in that gap — it was
+ * in `HELP_TEXT`, in both READMEs and in the handbook, and not on the card.
+ */
+const cardRows = [...code.matchAll(/className: 'dsh-qq-command' \}, h\('dt', null, '([^']+)'\)/g)]
+const cardCommands = new Set(cardRows.map((match) => match[1].split(/[\s:]/)[0]))
+check(
+  'the command card was read out of the source',
+  cardCommands.size >= 5,
+  `${String(cardCommands.size)} rows: ${[...cardCommands].join(' ')}`,
+)
+
+const routerSource = readFileSync(join(here, '..', 'lib', 'router.js'), 'utf8')
+const routerCommands = new Set()
+for (const block of routerSource.matchAll(
+  /const COMMANDS_(?:BARE|WITH_ARG|OPTIONAL_ARG) = \[([^\]]*)\]/g,
+)) {
+  for (const quoted of block[1].matchAll(/'(\/[a-z]+)'/g)) routerCommands.add(quoted[1])
+}
+check(
+  'the router command lists were read out of the source',
+  routerCommands.size >= 5,
+  `${String(routerCommands.size)} commands: ${[...routerCommands].join(' ')}`,
+)
+
+equal(
+  '★ the command card lists every command the router accepts',
+  [...cardCommands].sort(),
+  [...routerCommands].sort(),
+)
+
+// A row whose description is missing in one language renders as the literal text `undefined`, which
+// is the same failure the copy-table block above exists for — one level down, at the row.
+check(
+  '★ the /model row is on the card and says what it does in both languages',
+  cardRows.filter((match) => match[1].startsWith('/model')).length === 1 &&
+    typeof tables?.zh?.commandModel === 'string' &&
+    typeof tables?.en?.commandModel === 'string' &&
+    tables.zh.commandModel.includes('切换') &&
+    tables.en.commandModel.includes('switch'),
+  `${String(tables?.zh?.commandModel)} | ${String(tables?.en?.commandModel)}`,
+)
+
 console.log('\n-- 8. Form state flow: unsaved note, refused field, cancel vs picker failure --')
 
 /*

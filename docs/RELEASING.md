@@ -9,14 +9,20 @@
 #    package.json -> version
 #    package-lock.json 里也有同一处 version（两处：顶层和 packages[""] 里），顺手同步——
 #    npm ci 不比对它，但两份不一致的文件会误导下一个读它的人
-#    顺便把 README.md / README.zh.md 里的测试数量同步一下（改过测试的话）
+#    顺便把 README.md / README.zh.md / 本文件里的测试数量同步一下（改过测试的话）
+#    ——三处对不上时 CI 的 tools/check-doc-counts.mjs 会红并点名
 
-# 2. 本地先过一遍 CI 的全部步骤
+# 2. 本地先过一遍 CI 的全部步骤（顺序与 .github/workflows/ci.yml 一致，可逐条对照）
 npm ci
+# CI 的第一步是逐个 node --check：
+shopt -s globstar nullglob && for f in **/*.js **/*.mjs; do case "$f" in *node_modules*) continue ;; esac; node --check "$f" || exit 1; done
 node scripts/verify.mjs
+node scripts/verify-send-path.mjs
 node scripts/verify-client.mjs
+node tools/check-doc-counts.mjs --run   # 文档里的测试数量 + publish.yml 里给用户抄的仓库名（--run 会自己跑那三个测试脚本）
 node tools/check-unbound.mjs .
 node tools/check-unused-imports.mjs .
+# CI 的最后一步是「包里有用户要的东西」，本机对应下面第 3 步的 npm pack --dry-run
 
 # 3. 看一眼真的会被装出去的是什么
 npm pack --dry-run
@@ -101,14 +107,26 @@ tag 说的是"**这个**就是 1.0.0"。发布需要后者。
 只有 `package.json` 的 `version` 是权威，CI 与工作流都从它读。`package-lock.json` 里那两处是副本，
 同步是为了不误导人，没有任何程序依赖它们。
 
-README 里的测试数量（宿主侧 293 / 客户端 41 / 发送路径 60）不是从任何地方读出来的，是手写的。
-改过测试就顺手改它们；**不要为了对上文档去改测试**。
+三处文档写着同一组测试数量：`README.md`、`README.zh.md`、以及本文件上面那处
+（宿主侧 770 / 客户端 108 / 发送路径 60）。它们由 `tools/check-doc-counts.mjs` 把关：
+这个脚本从三个测试脚本的**实际输出**里取数，再和文档里写的逐个比，不一致就失败，
+并点名是哪个文件、写的多少、实际多少。CI 在跑完三个测试之后调它。
+
+同一个脚本还核对**上面那四个 Trusted Publisher 字段**——那份注释是手抄的，抄错的表现只是发布时
+403，所以本机必须有东西拦它。它拿注释里的属主与仓库名比 `package.json` 的 `repository`、
+拿 workflow filename 比本文件的文件名、确认 `Environment` 那行仍写着留空而工作流确实没有
+`environment`、拿文件头那句 `Actions → … → Run workflow` 比工作流的 `name:`，再比两版 README 的
+CI 徽章。仓库名曾经在这一块里写成 `dsh-qq`（其余每一处都是 `dsh-qq-plugin`）——那次没有任何
+本地检查会红，这就是这条闸加上来的原因。
+
+数字仍然要人手改（脚本只报错，不会替你改文档），但**改错了过不去**。
+**不要为了对上文档去改测试**——顺序永远是先改测试，再让这道闸告诉你文档该改成多少。
 
 ## 出问题怎么查
 
 | 现象 | 原因 |
 |---|---|
-| 发布时 **403**，且信息提到 trusted publisher | npm 那四个字段有拼写不符（最常见：把 workflow 写成路径 `.github/workflows/publish.yml`） |
+| 发布时 **403**，且信息提到 trusted publisher | npm 那四个字段有拼写不符（最常见：把 workflow 写成路径 `.github/workflows/publish.yml`）。属主、仓库名、文件名这三样现在在本机就会被 `tools/check-doc-counts.mjs` 拦住 |
 | 发布时 403，且提到 2FA | Trusted Publisher 没配上，npm 退回到了"要求 2FA"的老路径 |
 | `npm publish` 直接说包是 private | `package.json` 里的 `private: true` 没删 |
 | provenance 报错 | 仓库是 private，或 workflow 缺 `id-token: write` |
