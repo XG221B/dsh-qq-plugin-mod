@@ -29,7 +29,8 @@ machinery unnecessary — see [Differences from the WeChat version](#differences
   questions are delivered to QQ and answered by replying, so being away from the desk does not stall
   the agent.
 - **Proactive push.** `notify_qq` lets any session on this machine message you — that is what makes
-  "tell me when it is done" work.
+  "tell me when it is done" work. It works in practice: a ten-message burst was delivered in full,
+  and the last six of those went out as proactive pushes.
 - **Settings page** under **Settings → QQ**.
 
 ## Install
@@ -182,7 +183,7 @@ succeeded or failed.
 | Tool | What it does |
 |---|---|
 | `send_to_qq` | Send a file from this machine to **the conversation that asked**. Images arrive as photos, videos as playable clips, everything else as a file attachment |
-| `notify_qq` | Push to your current QQ conversation from **any session**. This is what "tell me when it is done" is built on |
+| `notify_qq` | Push to your current QQ conversation from **any session**. This is what "tell me when it is done" is built on, and it works in practice (a ten-message burst arrived in full; the last six were proactive pushes) |
 | `qq_session_control` | Look at, switch, create or interrupt conversations; list (or switch) models and their reasoning levels |
 
 > The `qq_` / `_qq` in those names is deliberate: **tool names are unique across the whole host
@@ -252,7 +253,7 @@ what you wrote and change it, while still knowing which folder is really being u
 | The whole app will not start | Same file. The fatal error itself says very little; the real cause is in the renderer console |
 | The bot does not reply | `boot.log` for `入站`; the `errors` array of `GET /.dsh-qq-plugin/status` |
 | Images or voice do nothing | `boot.log` for `附件下载失败` or `附件已停靠` |
-| "It will not send" | `boot.log` for `待发已入队` — proactive push has a quota, and the queue is flushed the next time you speak |
+| "It will not send" | `boot.log` for `待发已入队` — proactive-push rules can change and the plugin assumes no quota; anything undelivered is flushed the next time you speak |
 
 The debugging HTTP endpoints all live under `/.dsh-qq-plugin/`: `status`, `log`, `settings`,
 `permission-presets`, `accounts`, `login`, `start`, `stop` and a few more.
@@ -266,7 +267,7 @@ the WeChat one does not:
 |---|---|
 | Quoted messages | QQ's `msg_elements` **carry the quoted text directly**, so WeChat's `quoteHistory` cache is not needed |
 | Voice | The QQ service returns `voice_wav_url` plus `asr_refer_text`, so there is **no SILK decoding** step and none of its caveats |
-| Send queue | WeChat has to queue because iLink forbids unsolicited sends; QQ allows proactive push, so the queue here is only a **fallback for when the quota runs out** |
+| Send queue | WeChat has to queue because iLink forbids unsolicited sends; QQ allows proactive push, and the queue exists to **re-send anything that was not delivered** (network, platform rejection, changed rules) rather than to cover one specific failure |
 | Tool names | See above — global uniqueness across the host scope |
 | Installation | There is no build step and no `allowBuilds` prompt: the plugin is plain JavaScript, so a Git install packs and runs it as-is |
 

@@ -141,7 +141,7 @@ bot.on('ready', () => {
  * 一条入站消息就触发整轮探针。
  *
  * 之所以挂在消息上而不是自己定时触发：QQ 的被动回复窗口要求挂在一条
- * **5 分钟内**的入站消息上（`USAGE.md:462`），主动推送又受配额限制——
+ * **5 分钟内**的入站消息上（`USAGE.md:462`），主动推送的规则又说不清——
  * 用第一条入站消息当锚点，所有被动路径都能测到。
  */
 let ran = false
@@ -267,7 +267,7 @@ bot.on('message', async (ctx, message) => {
     await attempt('sendWakeup（is_wakeup: true 的主动消息）', () =>
       bot.sendWakeup({ scope: 'c2c', targetId: peerId }, '唤醒探测：这条是 is_wakeup'),
     )
-    log('  → 要回答：它算不算一条普通消息？配额独立于主动消息吗？')
+    log('  → 要回答：它算不算一条普通消息？和普通主动消息走的是同一套规则吗？')
     log('    更要紧的是：它**是不是"召回"而不是"撤回"** —— JSDoc 里的 recall 一词有歧义，')
     log('    与 recallMessage（撤回）只差一个字符，极容易搞混。请对照手机上看到的效果判断。')
 
