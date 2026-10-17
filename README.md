@@ -84,7 +84,7 @@ dsh plugin --profile desktop add dsh-qq-plugin
 dsh-qq-plugin
 ```
 
-Add a version if you need one: `dsh-qq-plugin@1.0.2`.
+Add a version if you need one: `dsh-qq-plugin@1.0.3`.
 </details>
 
 <details>
@@ -103,7 +103,7 @@ declares is `dsh-qq-plugin`.
 
 ```bash
 npm pack
-# → dsh-qq-plugin-1.0.2.tgz
+# → dsh-qq-plugin-1.0.3.tgz
 ```
 
 Paste the absolute path to that `.tgz` into **添加插件**.
