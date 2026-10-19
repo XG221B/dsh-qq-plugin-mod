@@ -54,6 +54,8 @@ export function apply(ctx, config = {}) {
   const home = resolveHome(ctx)
   configureLog(home)
   bootLog('apply: entered')
+  // 版本标记：诊断"现在跑的到底是哪份代码"时先看这一行（改代码后重启会刷新它）。
+  bootLog('apply: build=dev-20261019-completion7（完成去重 + 询问提醒不带摘要；清单对齐侧边栏；notify_qq 禁止贴回答）')
 
   try {
     const paths = resolvePaths(ctx, config)
@@ -83,6 +85,22 @@ export function apply(ctx, config = {}) {
         'agent/assistant-stream',
         (payload) => {
           runtime.onAssistantFrame(payload)
+        },
+        { global: true },
+      )
+      /*
+       * 完成提醒的信号源，与上面那个**不是同一个东西**：
+       *
+       * `agent/assistant-stream` 的 `end` 帧只是**一次模型 attempt** 结束（带工具调用的
+       * 回合会有多个）；真正的"用户回合完成"是 durable 事件 `turn/end`，每个回合恰好一次。
+       * 这个事件的载荷是**两个位置参数** `(session, event)`，不是对象——照 `ctx.on` 的原样接。
+       *
+       * 回调只做转发：宿主在提交路径上同步 emit，运行时内部会把它挪到异步队列里。
+       */
+      const detachSessionEvents = ctx.on(
+        'session/event',
+        (session, event) => {
+          runtime.onSessionEvent(session, event)
         },
         { global: true },
       )
@@ -134,6 +152,7 @@ export function apply(ctx, config = {}) {
       return () => {
         try {
           if (typeof detachStream === 'function') detachStream()
+          if (typeof detachSessionEvents === 'function') detachSessionEvents()
           if (typeof detachApproval === 'function') detachApproval()
           if (typeof detachQuestions === 'function') detachQuestions()
           if (typeof detachTools === 'function') detachTools()

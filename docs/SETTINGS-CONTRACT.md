@@ -216,7 +216,7 @@
 
 | 字段 | 类型 | 可空 | 客户端用途 |
 |---|---|---|---|
-| `settings` | `{ permissionPreset: string, requireConfirmation: boolean, allowCrossSessionNotify: boolean, settleMs: number, presenceNote: string, mergeWindowMs: number, autoReplyAttachments: boolean, maxReplyChars: number, workspacePath: string }` | **不建议可空** | 表单初值（draft）。**不是对象时整个「行为设置」区块不渲染** |
+| `settings` | `{ permissionPreset: string, requireConfirmation: boolean, allowCrossSessionNotify: boolean, completionNotify: boolean, settleMs: number, presenceNote: string, mergeWindowMs: number, autoReplyAttachments: boolean, maxReplyChars: number, completionDetailChars: number, workspacePath: string }` | **不建议可空** | 表单初值（draft）。**不是对象时整个「行为设置」区块不渲染** |
 | `defaults` | 与 `settings` 同键 | 可空 | **驱动唯一的全局「恢复默认」按钮**（点击即 `draft = defaults`）。缺失时该按钮 `disabled` |
 
 - **客户端读法**：`settings: settings.settings`、`defaults: settings.defaults`、
@@ -239,11 +239,13 @@
   |---|---|---|---|
   | `requireConfirmation` | `boolean` | `true` | 「会话操作先确认」 |
   | `allowCrossSessionNotify` | `boolean` | `true` | 「允许任意会话主动推送」 |
+  | `completionNotify` | `boolean` | `true` | 「任务完成提醒」 |
   | `settleMs` | `number`（毫秒，≥0） | `1200` | 「回复聚合静默窗口（毫秒）」 |
   | `presenceNote` | `string` | 一段中文渠道说明（`DEFAULT_PRESENCE_NOTE`，定义在 `lib/settings.js`） | 「渠道上下文说明」（多行 `textarea`） |
   | `mergeWindowMs` | `number`（毫秒，≥0） | `10000` | 「附件合并窗口（毫秒）」 |
   | `autoReplyAttachments` | `boolean` | `true` | 「自动回应附件」 |
   | `maxReplyChars` | `number`（≥0，**`0` 表示不限制**） | `4000` | 「单条回复字数上限」 |
+  | `completionDetailChars` | `number`（≥0，**`0` 表示不限制**） | `1000` | 「查看回答时最多显示多少字」 |
   | `workspacePath` | `string`（**空串 = 用默认位置**） | `''` → `$DSH_HOME/dsh_qq` | 「会话文件夹路径」 |
 
   ⚠️ **`workspacePath` 是唯一一个填错会让插件起不来的设置**，所以校验与回落都在宿主侧
@@ -262,7 +264,7 @@
   ⚠️ **这张表的唯一来源是 `lib/settings.js` 的 `SETTINGS_SCHEMA`**（每项一个校验器
   加一个 `default`）。`settingsForPage()` 的 `settings` / `defaults` 两层都由它派生，
   加载归一（`state.js`）与落盘（`runtime.js` `#persistSettings()`）也一样——
-  所以这里列的九项若与那份 schema 不符，**以 schema 为准并回来改本文**。
+  所以这里列的十一项若与那份 schema 不符，**以 schema 为准并回来改本文**。
   加一项设置只需在 schema 里加一行：往返测试的断言数会跟着走，
   而"运行时持有的字段集"与 schema 键集不一致会被 `verify.mjs` 当场判红
   （纯 JS 没有编译器，那条键集一致性断言就是 schema 的守护）。
@@ -285,7 +287,7 @@
 ### 2.9 `POST /.dsh-qq-plugin/settings` ✅ 已实现
 
 - **请求体**：**只含 `SETTINGS_FIELDS` 里的键**，即
-  `{ requireConfirmation?, allowCrossSessionNotify?, settleMs?, presenceNote?, mergeWindowMs?, autoReplyAttachments?, maxReplyChars? }`
+  `{ requireConfirmation?, allowCrossSessionNotify?, completionNotify?, settleMs?, presenceNote?, mergeWindowMs?, autoReplyAttachments?, maxReplyChars?, completionDetailChars?, workspacePath? }`
   （draft 里存在的键才发；字段来源见 §2.8）。带 `content-type: application/json`。
   `permissionPreset` **不在其中**——它走独立的 `/permission-preset` 路由。
 - **响应形状**（现状：`applySettings(body)` 之后 `settingsForPage()`）：
@@ -490,7 +492,7 @@
 | 验证码输入框 | `/login` 的 `awaitingVerifyCode === true`（宿主目前不发） |
 | 「已连接 QQ / 之前绑过 / 登录失败」 | `/login` 的 `phase` ∈ {`succeeded`,`already-bound`,`failed`} |
 | 权限下拉 | `/permission-presets` 的 `available` + `sentinel` + `applied`；写入靠 `/permission-preset` |
-| 「行为设置」八个控件 + 一个全局「恢复默认」 | `GET /settings` 的 `settings` 与 `defaults`；写入靠 `POST /settings`（回传 `SETTINGS_FIELDS` 里的键） |
+| 「行为设置」十个控件 + 一个全局「恢复默认」 | `GET /settings` 的 `settings` 与 `defaults`；写入靠 `POST /settings`（回传 `SETTINGS_FIELDS` 里的键） |
 | 保存按钮 / 「已保存」 | 同上 |
 | 诊断「事实」表 | `GET /log.path` + `status.workspace`/`conversationCount`/`pendingInteractions`/`replyLimiter` |
 | 日志末尾 `pre` | `GET /log.tail`（字符串，取末 60 行） |

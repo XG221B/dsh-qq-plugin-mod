@@ -1,5 +1,8 @@
 # dsh-qq-plugin
 
+> **Modified copy.** Based on [dsh-qq-plugin](https://github.com/xcisxc29/dsh-qq-plugin) by xcisxc29 (MIT).
+> Original copyright and license are retained in [LICENSE](LICENSE); source is noted in [NOTICE](NOTICE).
+
 [![CI](https://github.com/xcisxc29/dsh-qq-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/xcisxc29/dsh-qq-plugin/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-qq-plugin.svg)](https://www.npmjs.com/package/dsh-qq-plugin)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
@@ -33,7 +36,9 @@ machinery unnecessary — see [Differences from the WeChat version](#differences
   session workspace and handed to the agent; the agent sends files back with `send_to_qq`.
   **A reply that runs long is turned into a `.md` file** and sent to your phone instead of being cut.
 - **One QQ chat, many DSH conversations.** `/new`, `/list`, `/switch`, `/current`, `/cancel` — or
-  just say "switch to the other one". The list has **session folders** and **sessions** as two levels.
+  just say "switch to the other one". `/list` is this workspace's conversations; `/list all` lists
+  **every conversation on the machine, grouped by project**, and one number or trailing id switches
+  straight to it. Deleted projects and archived conversations are left out.
 - **Pick the model and the reasoning level from your phone too.** `/model` lists the models with
   each one's reasoning levels; `/model 2` and `/model 等级 high` switch them, effective from the
   **next** step.
@@ -45,10 +50,16 @@ machinery unnecessary — see [Differences from the WeChat version](#differences
   and the last six of those went out as proactive pushes. (Tencent's rules for unsolicited sends can
   change and **the plugin assumes no quota**; anything undelivered is queued and flushed the next
   time you speak.)
+- **Task completion notices.** On by default, a task started **on the desktop** (in any conversation,
+  including the QQ-bound one) pushes only one line to the bound QQ chat when it finishes —
+  「项目 · 对话」已结束任务 — no answer body, no numbering, no instructions. Questions asked from
+  QQ still get their full reply there. `/detail` shows the answer behind the latest desktop task.
+  Conversations **waiting for your answer** (approval or a question) also push one plain reminder
+  line; duplicate completions within a minute are collapsed into one notice.
 - **Scheduled tasks.** Run through the DSH host's own `schedule_create` / `schedule_list` /
   `schedule_delete` / `schedule_update` — just say "wake me at 23:12". The plugin does not
   reimplement what DSH already has; it is only the channel.
-- **Settings page** under **Settings → QQ** — nine settings, a native folder picker, and diagnostics.
+- **Settings page** under **Settings → QQ** — eleven settings, a native folder picker, and diagnostics.
 
 ## Install
 
@@ -189,14 +200,25 @@ One shot, four things proved: **ten rows per screen**, a **six-character id at t
 (`7cee80`, `4b55e1`…), the current conversation marked **← 当前**, and that footer line. The list also
 tells you there are **89 more conversations in the other session folders**.
 
-`/list all` is **the level above — the session folders** (across projects and workspaces), each with
-its conversation count; reply with a number or a name to enter one, and what you get is that
-folder's conversation list (the screenshot replies `1`, so it enters 「QQ 会话」):
+`/list all` goes wider — **every conversation on this machine, grouped by project**, each row
+carrying its title, relative time and trailing id:
 
-<img src="docs/images/session-folders.jpg" width="320" alt="Replying /list all in QQ: the agent answers with a 会话夹 (1/1) list — QQ 会话 11 个会话, workplace 62, dsh_wechat 21, texttry 1, dsh_orb 1, browser-sessions 3 — footer 「回复编号或名字进入。」; the user then replies 1 and the agent sends the 【QQ 会话】 conversation list">
+```
+全部对话（1/2）
 
-**Entering a folder only moves where you are browsing, not which conversation you are bound to** —
-to actually switch you still pick a conversation inside it.
+【QQ 会话】
+1. 修复登录 · 2 分钟前 ← 当前  e716f0
+2. 写周报 · 1 小时前  9d4e7b
+
+【游戏项目】
+3. 调一下存档逻辑 · 昨天  3f2a1c
+
+回复编号或行尾 6 位 id 切换；回复「查看其余」看下十个。
+```
+
+**A number or a trailing id switches straight to that conversation** — there is no folder to
+enter first. **Deleted projects and archived conversations are left out**, so the list matches what
+the desktop sidebar shows.
 
 **A bare digit *is* `/switch <digit>`**: with the list on screen there is no need to type `/switch`,
 just reply `2` — and it **tells you which one you landed on**, short id included, so you can check it
@@ -215,8 +237,8 @@ command:
 <img src="docs/images/natural-language.jpg" width="320" alt="Having earlier replied 2 to switch, the user now sends the plain-language 「查看所有会话」; instead of an error the agent sends the session-folder list plus 「已列出，请看上面的会话列表。回复对应编号即可切换，回复「查看其余」看下一页。」">
 
 The agent judges **intent** rather than matching fixed rules: it recognised "list conversations",
-listed the session folders, and told you that a number switches and 「查看其余」 turns the page.
-A switch also reports whether it succeeded or failed.
+listed every conversation grouped by project, and told you that a number switches and 「查看其余」
+turns the page. A switch also reports whether it succeeded or failed.
 
 Type these to control which DSH conversation you are talking to:
 
@@ -224,10 +246,10 @@ Type these to control which DSH conversation you are talking to:
 |---|---|
 | `/new [title]` | Start a fresh conversation. Anything after it becomes the title: `/new 修复登录` starts a conversation called 「修复登录」 |
 | `/list` | Go straight to this workspace's conversations (ten per screen) |
-| `/list all` | List the **session folders** (workspaces) on this machine, one per line with its conversation count; reply with a number or a name to enter |
+| `/list all` | List **every conversation on this machine, grouped by project**; reply with a number or a trailing id to switch straight to it. Deleted projects and archived conversations are left out |
 | `/switch 3` | Move to the 3rd row **of that screen** |
 | `/switch e716f0` | Move by the **short id at the end of the row** — unrelated to numbering, and it never expires |
-| Reply 「查看其余」 | Walk down ten rows (both levels, all the way to the end). Numbering runs on across screens (1–10, then 11–20) |
+| Reply 「查看其余」 | Walk down ten rows (both lists, all the way to the end). Numbering runs on across screens (1–10, then 11–20) |
 | Reply `3`, a name, or a trailing id | No need to type `/switch` while the list is on screen |
 | Quote a list message → `/switch 3` | Numbered by **that screen**; the numbering is frozen inside that message |
 | `/model` | Which models there are, and each one's **reasoning levels**, with the one in use marked |
@@ -235,6 +257,7 @@ Type these to control which DSH conversation you are talking to:
 | `/model 等级 high` | Change the reasoning level of the current model (the level names are the ones the list prints) |
 | `/model 2 等级 high` | Change the model and the level together |
 | `/current` | Which conversation you are in |
+| `/detail [trailing id]` | Show the answer behind the latest task-completion notice — no argument means the latest one. Only the current run is kept in memory; a trailing id narrows it to that conversation |
 | `/cancel` | Stop the task that is running |
 | `/help` | This list |
 
@@ -247,12 +270,10 @@ not one, so `/news` is not `/new`.
 reply with that, or **quote that screen's list message** and the number is read as that message
 printed it.
 
-**The list has two levels, ten rows per screen**: `/list` opens this workspace's conversations;
-`/list all` lists the **session folders** (workspaces), which you enter by number or name. Both
-levels walk down ten rows with 「查看其余」, and **numbering runs on across screens**. When you reach
-the end it says so instead of inviting you to keep going. **Entering a folder only moves where you
-are browsing, not which conversation you are bound to** — to actually switch you still pick a
-conversation inside it.
+**Ten rows per screen, one flat list**: `/list` opens this workspace's conversations; `/list all`
+lists every conversation on the machine grouped by project. Both walk down ten rows with
+「查看其余」, and **numbering runs on across screens**. When you reach the end it says so instead of
+inviting you to keep going.
 
 ### Models and reasoning levels
 
@@ -462,16 +483,18 @@ Diagnostics gives you **the log path plus the tail of the log**, so most problem
 yourself** — whether a send failed, whether you were rate-limited, whether an attachment never
 landed. The last line in the shot happens to be a successful `send_to_qq`.
 
-Adding those cards up, there are nine settings in total:
+Adding those cards up, there are eleven settings in total:
 
 | Setting | Default | What it does |
 |---|---|---|
 | `permissionPreset` | `danger-full-access` | Permission preset for QQ conversations. A permission prompt that arrives on a phone stalls the task until you answer it, so the default keeps the gate open — see [Security](#security) |
 | `requireConfirmation` | on | Whether the agent asks you once before it performs a conversation operation |
 | `allowCrossSessionNotify` | on | Turn it off and `notify_qq` may only push to the caller's own conversation (the stricter posture) |
+| `completionNotify` | on | When a conversation on this machine finishes a turn, push one line 「项目 · 对话」已结束任务 to the bound QQ chat — no answer body, no numbering, no instructions. The QQ-bound conversation is skipped (its reply already arrived), as are subagent sessions, archived conversations and deleted projects |
 | `mergeWindowMs` | 10000 | How long an attachment-only message waits for you to add an instruction. **0 = do not wait** |
 | `autoReplyAttachments` | on | Whether the attachments are handed to the agent when no instruction arrives inside that window. Off does **not** mean "ignore the attachments" — it means "wait for the user to say something" |
 | `maxReplyChars` | 4000 | Above this, the reply is sent as a `.md` file. **0 = no limit** |
+| `completionDetailChars` | 1000 | Character cap when `/detail` prints an answer. **0 = no limit** |
 | `settleMs` | 1200 | How long the stream must go quiet before the reply is sent |
 | `presenceNote` | a short Chinese note | Sent to the agent with every message: you are on a phone, you cannot see this computer's screen, and if it wants you to look at something it should just send it |
 | `workspacePath` | empty = `$DSH_HOME\dsh_qq` | The conversation folder. **Must be an absolute path**; a bad value only means "did not take effect", never "the plugin will not start" |
@@ -583,7 +606,7 @@ node scripts/verify-client.mjs   # client registration shape (not a visual check
 node scripts/verify-send-path.mjs  # the send path, against a fake SDK
 ```
 
-**782** host checks, **108** client checks, **60** send-path checks.
+**784** host checks, **108** client checks, **60** send-path checks.
 
 Those three numbers are **read out of the runs above, not typed by hand**: `tools/check-doc-counts.mjs`
 compares them against what the scripts actually print, and the CI job fails naming the file if any of

@@ -222,7 +222,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
 
   // 本工作区空、别处有：数出来并点名，而不是让它们消失
   const held = [{ sessionId: 's2', title: 'b', updatedAt: 1, workspace: 'C:\\me\\项目甲' }]
-  check('★ 本工作区空时也给出路', r.heldOnlyList(held, 'QQ 会话').includes('发 /list all 看会话夹'), true)
+  check('★ 本工作区空时也给出路', r.heldOnlyList(held, 'QQ 会话').includes('发 /list all 看全部对话'), true)
   check('本工作区空时点名别的工作区', r.heldOnlyList(held, 'QQ 会话').includes('（项目甲）'), true)
   check('★ heldNames 去重、排序、取末段', JSON.stringify(r.heldNames([...held, ...held, { sessionId: 's9', title: 'z', workspace: 'C:\\b' }])), JSON.stringify(['b', '项目甲']))
   check('一行会话屏里的"其余的在哪"也点名工作区', r.renderSessionScreen(ownTwelve.slice(0, 2), { label: 'QQ 会话', page: 1, now: NOW, held: { count: 3, names: ['项目甲'] } }).text.includes('（项目甲）'), true)
@@ -233,17 +233,17 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('relativeTime 分钟', r.relativeTime(NOW - 5 * 60_000, NOW), '5 分钟前')
   check('relativeTime 昨天（24–48 小时）', r.relativeTime(NOW - 25 * 3_600_000, NOW), '昨天')
   check('★ 帮助里给出分页与「查看其余」', r.HELP_TEXT.includes('查看其余') && r.HELP_TEXT.includes('每屏最多 10 条'), true)
-  check('★ 帮助里 /list all 说的是会话夹', r.HELP_TEXT.includes('列出全部会话夹'), true)
+  check('★ 帮助里 /list all 说的是全部项目的对话', r.HELP_TEXT.includes('列出全部项目的对话'), true)
   check('★ 帮助里 /switch 说明了引用能冻结编号', r.HELP_TEXT.includes('引用列表消息再回编号'), true)
   check('★ 帮助里 /switch <id> 说明行尾那 6 位', r.HELP_TEXT.includes('/switch e716f0'), true)
   check('★ 帮助里说明了"列表在眼前时直接回编号"', r.HELP_TEXT.includes('不必打 /switch'), true)
 
 }
 
-// ---- `/list` `/list all` `/switch` 端到端：两层、分页、引用冻结 -------------
+// ---- `/list` `/list all` `/switch` 端到端：平铺、分页、引用冻结 -------------
 /*
  * 这一节用假宿主跑**整条链路**（路由 + `delivered` 落位），因为要证明的东西全都是
- * "跨若干条消息才有意义"的：编号跨屏连续、引用把旧编号钉住、进会话夹不改绑定、
+ * "跨若干条消息才有意义"的：编号跨屏连续、引用把旧编号钉住、平铺清单直接切换、
  * 「查看其余」翻到底之后的措辞。
  *
  * ⚠️ 它证明的是**逻辑与断言符合微信的契约**，不是"手机上看起来一样"——
@@ -467,7 +467,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ 重启后「查看其余」仍然接着翻（位置是落盘的）', (await restarted2.route({ ...CONV, text: '查看其余' })).text.startsWith('【QQ 会话】会话（3/3）'), true)
   }
 
-  // ---- 三、会话夹那一层：进入只改浏览位置，不改绑定 ----
+  // ---- 三、平铺视图：按项目分组、直接显示标题、编号直接切换 ----
   {
     const h = harness({
       own: [row(1, 100), row(2, 90), row(3, 80)],
@@ -476,72 +476,65 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     await send(h, '你好')
     const before = await bound(h)
 
-    const folders = await send(h, '/list all')
-    check('★ /list all 列出会话夹', folders.text.startsWith('会话夹（1/1）'), true)
-    check('★ 每个会话夹一行、带会话数', folders.text.includes('1. QQ 会话  3 个会话') && folders.text.includes('2. 项目甲  2 个会话'), true)
-    check('★ 会话夹按最近活跃排', folders.text.includes('3. 项目乙  1 个会话'), true)
-    check('会话夹那一层不编号会话（那是夹子，不是对话）', folders.numbered, undefined)
+    const flat = await send(h, '/list all')
+    check('★ /list all 是平铺清单（不再先列项目文件夹）', flat.text.startsWith('全部对话（1/1）'), true)
+    check('★ 项目作为分组标题出现', JSON.stringify([flat.text.includes('【QQ 会话】'), flat.text.includes('【项目甲】'), flat.text.includes('【项目乙】')]), JSON.stringify([true, true, true]))
+    check('★ 每行直接是对话标题', JSON.stringify([rowLines(flat.text).length, flat.text.includes('4. 对话11')]), JSON.stringify([6, true]))
+    check('★ 本工作区排最前、其余按项目最近活跃排', flat.text.indexOf('【QQ 会话】') < flat.text.indexOf('【项目甲】') && flat.text.indexOf('【项目甲】') < flat.text.indexOf('【项目乙】'), true)
+    check('★ 平铺清单带编号（编号来自这条消息）', JSON.stringify([flat.numbered.first, flat.numbered.sessions.length]), JSON.stringify([1, 6]))
 
-    const entered = await send(h, '2')
-    check('★ 回编号进入会话夹', entered.text.startsWith('【项目甲】会话（1/1）'), true)
-    check('★ 进去了就看到那个夹子的会话', entered.text.includes('1. 对话11'), true)
-    check('★★ 进会话夹只改浏览位置，不改绑定', await bound(h), before)
-    check('★ 位置落在那个会话夹的会话层', JSON.stringify([h.saved.browsing[CONV.conversationId].level, h.saved.browsing[CONV.conversationId].workspace]), JSON.stringify(['sessions', 'C:\\me\\项目甲']))
+    const chosen = await send(h, '4')
+    check('★ 回编号直接切到那个对话（不用先进入项目）', await bound(h), h.others['C:\\me\\项目甲'][0].sessionId)
+    check('★ 切换结果点出标题', chosen.text.includes('已切换到「对话11」'), true)
+    check('★ 一次切换结束浏览', h.saved.browsing[CONV.conversationId], undefined)
 
-    // 从夹子那一层直接回名字也进得去
+    const byId = await send(h, `/switch ${r.shortId(h.others['C:\\me\\项目乙'][0].sessionId)}`)
+    check('★ 行尾 6 位 id 也能直接切（跨项目）', await bound(h), h.others['C:\\me\\项目乙'][0].sessionId)
+    check('★ 短 id 切换有确认文案', byId.text.includes('已切换到「对话21」'), true)
+
     await send(h, '/list all')
-    const byName = await send(h, '项目乙')
-    check('★ 会话夹按名字进入', byName.text.startsWith('【项目乙】会话（1/1）'), true)
-    check('进第二个夹子仍然不改绑定', await bound(h), before)
+    const bare = await send(h, '2')
+    check('★ 清单就在眼前时裸数字按这一屏读', await bound(h), h.own[1].sessionId)
+    check('★ 裸数字也是真的切换（不是交给 agent）', bare.kind, 'reply')
+    check('★ 换过绑定之后再列清单仍然正确编号', (await send(h, '/list all')).numbered.sessions[0].sessionId, h.live()[0].sessionId)
+  }
 
-    // 在里面再选一个会话，这才是"切过去"
-    const chosen = await send(h, '1')
-    check('★ 在夹子里回编号才真的切过去', await bound(h), h.others['C:\\me\\项目乙'][0].sessionId)
-    check('切换之后浏览结束', h.saved.browsing[CONV.conversationId], undefined)
+  // ---- 三之二、平铺视图分页、到底、引用冻结与旧位置兼容 ----
+  {
+    const h = harness({ own: Array.from({ length: 25 }, (_, index) => row(index + 1, 2_000 - index)) })
+    await send(h, '你好')
+    const page1 = await send(h, '/list all')
+    check('★ 平铺视图每屏 10 条', rowLines(page1.text).length, 10)
+    check('★ 平铺视图标题带屏号', page1.text.startsWith('全部对话（1/3）'), true)
+    check('★ 有下一页时邀请翻页', page1.text.includes('查看其余'), true)
+    check('★ 位置落在 all 层第一屏', JSON.stringify([h.saved.browsing[CONV.conversationId].level, h.saved.browsing[CONV.conversationId].page]), JSON.stringify(['all', 1]))
+    const page2 = await send(h, '查看其余')
+    check('★ 平铺视图编号跨屏连续（11 起）', JSON.stringify([page2.numbered.first, page2.text.includes('11. 对话11')]), JSON.stringify([11, true]))
+    check('★ 位置推到第 2 屏', h.saved.browsing[CONV.conversationId].page, 2)
+    const page3 = await send(h, '查看其余')
+    check('★ 最后一屏不邀请翻页', page3.text.includes('查看其余'), false)
+    check('★ 最后一屏仍然报出出路', page3.text.includes('回复编号或行尾 6 位 id 切换。'), true)
+    const bottom = await send(h, '查看其余')
+    check('★ 翻到底明说页数', bottom.text.split('\n')[0], '全部对话只有 3 页，已经到底了。')
+    check('★ 到底后位置留着', h.saved.browsing[CONV.conversationId].page, 3)
+    check('★ 到底之后仍然报出出路', bottom.text.includes('回复编号或行尾 6 位 id 切换'), true)
 
-    // 反向对照：夹子里越界的编号不是"一步"，交给 agent
+    // 引用冻结：平铺视图与旧的会话层走同一套编号账本
     await send(h, '/list all')
-    await send(h, '项目乙')
-    check('★ 夹子里越界的编号交给 agent（不猜）', (await send(h, '9')).kind, 'prompt')
+    const frozenScreen = await send(h, '查看其余')
+    for (let index = 0; index < 5; index += 1) h.own.push(row(100 + index, 5_000 + index))
+    await send(h, '12', frozenScreen.text)
+    check('★ 引用一屏旧清单：编号按那一屏解析', await bound(h), frozenScreen.numbered.sessions[1].sessionId)
+    check('★ 引用冻结的编号不会漂到活清单', (await bound(h)) !== h.live()[11].sessionId, true)
+    check('★ 引用之后浏览结束', h.saved.browsing[CONV.conversationId], undefined)
 
-    // 同名会话夹：必须问回去，而不是进错一个
-    const twins = harness({
-      own: [row(1, 100)],
-      others: { 'C:\\a\\workplace': [row(11, 300)], 'D:\\b\\workplace': [row(21, 200)] },
-    })
-    await send(twins, '你好')
-    const twinBefore = await bound(twins)
-    await send(twins, '/list all')
-    const ambiguous = await send(twins, 'workplace')
-    check('★ 同名会话夹问回去', ambiguous.text.startsWith('有多个会话夹匹配「workplace」'), true)
-    check('★ 歧义时点出编号与完整路径', ambiguous.text.includes('3. D:\\b\\workplace  1 个会话'), true)
-    check('★ 歧义时什么都不进（绑定与位置都不变）', await bound(twins), twinBefore)
-    check('歧义时位置留在会话夹那一层', twins.saved.browsing[CONV.conversationId].level, 'folders')
-    const resolved = await send(twins, '3')
-    check('回复编号就进得去', resolved.text.startsWith('【workplace】会话（1/1）'), true)
-    check('进的是那一个（按路径分的，不是按名字）', twins.saved.browsing[CONV.conversationId].workspace, 'D:\\b\\workplace')
-
-    // 会话夹那一层也要能翻，而且用的是**同一句**「查看其余」
-    const manyFolders = harness({
-      own: [row(1, 100)],
-      others: Object.fromEntries(
-        Array.from({ length: 12 }, (_, index) => [
-          `C:\\me\\项目${String(index).padStart(2, '0')}`,
-          [row(50 + index, 500 - index)],
-        ]),
-      ),
-    })
-    await send(manyFolders, '你好')
-    const folderPage1 = await send(manyFolders, '/list all')
-    check('★ 会话夹每屏 10 个', rowLines(folderPage1.text).length, 10)
-    check('★ 会话夹还没到底时邀请翻页', folderPage1.text.includes('回复「查看其余」看下十个'), true)
-    const folderPage2 = await send(manyFolders, '查看其余')
-    check('★ 会话夹也翻十条，编号接着 11 起', JSON.stringify([folderPage2.text.includes('11. 项目09  1 个会话'), folderPage2.text.includes('13. 项目11  1 个会话')]), JSON.stringify([true, true]))
-    check('★ 会话夹最后一屏不邀请翻页', folderPage2.text.includes('查看其余'), false)
-    const folderBottom = await send(manyFolders, '查看其余')
-    check('★ 会话夹翻到底的措辞', folderBottom.text.split('\n')[0], '会话夹只有 2 页，已经到底了。')
-    check('★ 到底时仍然给出路（回编号或名字进入）', folderBottom.text.includes('回复编号或名字进入。'), true)
-    check('★ 到底时位置留着（用户显然还在读）', manyFolders.saved.browsing[CONV.conversationId].level, 'folders')
+    // 升级兼容：旧版本落盘的 folders 位置仍然能工作，不被当成坏值
+    const legacyH = harness({ own: [row(1, 100)], others: { 'C:\\me\\项目甲': [row(11, 300)] } })
+    // 位置必须在第一次 route 之前就落盘：路由首次加载会把状态归一成自己的副本。
+    legacyH.saved.browsing[CONV.conversationId] = { level: 'folders', workspace: '', page: 1, at: Date.now() }
+    await send(legacyH, '你好')
+    const legacy = await send(legacyH, '2')
+    check('★ 旧的 folders 位置仍能进入项目（升级兼容）', legacy.text.startsWith('【项目甲】会话（1/1）'), true)
   }
 
   // ---- 四、本工作区空、以及浏览位置过期 ----
@@ -551,7 +544,8 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ 本工作区空时说出来，而不是一条空清单', listed.text.includes('【QQ 会话】还没有对话'), true)
     check('★ 并点数出别的会话夹', listed.text.includes('另有 2 个对话在其它会话夹（项目甲）'), true)
     check('★ 没有东西可翻时不留下位置', h.saved.browsing[CONV.conversationId], undefined)
-    check('★ /list all 仍然能列出会话夹', (await send(h, '/list all')).text.includes('1. 项目甲  2 个会话'), true)
+    const listedAll = await send(h, '/list all')
+    check('★ /list all 仍然能列出全部对话（平铺）', listedAll.text.includes('【项目甲】') && listedAll.text.includes('1. 对话11'), true)
 
     const empty = harness()
     check('★ 一台机器一条会话都没有时也有一句人话', (await send(empty, '/list')).text, '还没有任何对话，直接发消息就会新建一个。')
@@ -1606,7 +1600,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
   check('★ 描述里说清了模型清单带推理等级', def.description.includes('Each model is listed with its reasoning levels'), true)
   check('level 不是必填', JSON.stringify(def.parameters.required), JSON.stringify(['action']))
   // 清单分两层：agent 必须说得出它刚展示的是"本工作区的会话"还是"工作区本身"。
-  check('★ 描述说明清单分两层（list 是会话，all 是会话夹）', def.description.includes('The list has two levels'), true)
+  check('★ 描述说明清单分两层（list 是会话，all 是全部项目的对话）', def.description.includes('The list has two levels'), true)
   check('★ 描述说明两层都每屏十条、编号跨屏连续', def.description.includes('numbering that runs on across pages'), true)
 
   check('新建确认文案（有标题）', st.switchConfirmation('new', '测试会话'), '已新建对话「测试会话」，从现在起你的消息发到这里。')
@@ -2005,11 +1999,11 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
     check('★ settingsForPage 返回 settings/defaults 两层', JSON.stringify(Object.keys(page).sort()), JSON.stringify(['defaults', 'settings']))
     const pageKeys = Object.keys(page.settings).sort()
     check('★ 两层键集合一致', JSON.stringify(Object.keys(page.defaults).sort()), JSON.stringify(pageKeys))
-    // ⚠️ 这里**故意写死九项名字**，不从 schema 派生。
+    // ⚠️ 这里**故意写死十一项名字**，不从 schema 派生。
     // 派生的话就成了自己跟自己比（schema 少一项它也跟着少，永远相等），
     // 而这条断言的用途恰恰是：把设置页对客户端承诺的字段集钉住。
     // "schema 与运行时实际持有的字段集一致"由下面那段 schema 驱动的测试负责，两条各司其职。
-    check('★ 设置项就是这九项', JSON.stringify(pageKeys), JSON.stringify(['allowCrossSessionNotify', 'autoReplyAttachments', 'maxReplyChars', 'mergeWindowMs', 'permissionPreset', 'presenceNote', 'requireConfirmation', 'settleMs', 'workspacePath']))
+    check('★ 设置项就是这十一项', JSON.stringify(pageKeys), JSON.stringify(['allowCrossSessionNotify', 'autoReplyAttachments', 'completionDetailChars', 'completionNotify', 'maxReplyChars', 'mergeWindowMs', 'permissionPreset', 'presenceNote', 'requireConfirmation', 'settleMs', 'workspacePath']))
     const defaults = page.defaults
     check('默认预设与微信一致', defaults.permissionPreset, 'danger-full-access')
     check('默认确认策略与微信一致', defaults.requireConfirmation, true)
@@ -2561,6 +2555,8 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
        * 改回 mtime 的清单在这里就会读不到时间。
        */
       const seedSession = (id, cwd, title, at) => {
+        // 工作目录必须真实存在：清单会过滤"已删除的项目"（目录不存在 = 项目不在了）。
+        mkdirSeed(cwd, { recursive: true })
         const sessionDir = join(dir, 'sessions', si.encodeWorkspaceDir(cwd), id)
         mkdirSeed(sessionDir, { recursive: true })
         const log = join(sessionDir, 'log.jsonl')
@@ -2594,7 +2590,7 @@ check('未知帧被记录形态', typeof wrap({ weird: 1 }).frameShape, 'string'
       check('★ 工具 list 告诉 agent 不要复述这份清单', stored.detail.includes('不要重复'), true)
 
       const storedAll = await modelRuntime.controlSession('session-header', 'list', 'all')
-      check('★ 工具 list all 走的是**会话夹**那一层（夹子不是会话）', JSON.stringify(storedAll.sessions), JSON.stringify([]))
+      check('★ 工具 list all 走平铺视图：agent 拿到的就是用户看到的编号', JSON.stringify([storedAll.sessions.length, storedAll.sessions[0]?.index, storedAll.sessions[0]?.title]), JSON.stringify([3, 1, '修登录']))
       check('工具 list all 仍然成功', storedAll.ok, true)
       check('★ list all 不再报"其余在别处"（全都在这儿了）', JSON.stringify([storedAll.otherWorkspaces, storedAll.otherNames]), JSON.stringify([0, []]))
     }

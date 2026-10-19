@@ -1,0 +1,11 @@
+Modified copy of dsh-qq-plugin
+==============================
+
+Upstream source: https://github.com/xcisxc29/dsh-qq-plugin
+Original copyright: Copyright (c) 2026 xcisxc29
+License: MIT — see LICENSE.
+
+This repository contains modifications to the upstream source. The
+modifications are recorded in the Git history (commits after the upstream
+1.0.3 commit `9da260b`). The original copyright notice and the MIT permission
+notice are retained unchanged.

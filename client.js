@@ -82,11 +82,13 @@ const HANDBOOK_URL = 'https://github.com/xcisxc29/dsh-qq-plugin/blob/main/docs/H
 const SETTINGS_FIELDS = [
   'requireConfirmation',
   'allowCrossSessionNotify',
+  'completionNotify',
   'settleMs',
   'presenceNote',
   'mergeWindowMs',
   'autoReplyAttachments',
   'maxReplyChars',
+  'completionDetailChars',
   'workspacePath',
 ]
 
@@ -319,6 +321,12 @@ window.__ModuleLoader__.load({
         allowCrossSessionNotify: '允许其他会话推送到 QQ',
         allowCrossSessionNotifyHint:
           '开启后，任何会话都能主动发消息或文件到 QQ——包括你正在电脑上干活、它做完后通知你的情况。关掉则只有 QQ 对话自己那个会话能发。',
+        completionNotify: '任务完成提醒',
+        completionNotifyHint:
+          '任务做完、或者某个对话在等你回答/确认时，主动发一条 QQ 消息告诉你，不用守在电脑前。',
+        completionDetailChars: '查看回答时最多显示多少字',
+        completionDetailCharsHint:
+          '回 /detail 查看回答时，最多显示这么多字。填 0 表示不限制，完整回答仍然在 DSH 里看。',
         settleMs: '回复聚合静默窗口（毫秒）',
         settleMsHint: '间隔小于这个值就合并成一条。调大更完整但更慢，调小更快但可能拆成多条。',
         mergeWindowMs: '附件合并窗口（毫秒）',
@@ -367,6 +375,7 @@ window.__ModuleLoader__.load({
         commandNew: '新建对话，可带标题',
         commandList: '列出所有对话',
         commandSwitch: '切换到第 N 个对话',
+        commandDetail: '查看某次完成任务的回答；不带参数时看最近一次',
         commandModel: '查看有哪些模型和推理等级；带上名字或编号就切换。只换等级：/model 等级 high',
         commandCurrent: '显示当前对话',
         commandCancel: '中断当前任务',
@@ -424,6 +433,12 @@ window.__ModuleLoader__.load({
         allowCrossSessionNotify: 'Let other sessions push to QQ',
         allowCrossSessionNotifyHint:
           'On, any session may send you a message or a file — which is how a task that finishes while you are away can still reach you. Off, only the session the QQ conversation is bound to may send.',
+        completionNotify: 'Task completion notice',
+        completionNotifyHint:
+          'When a task finishes, or a conversation is waiting for your answer/confirmation, send a QQ message so you do not have to watch the screen.',
+        completionDetailChars: 'Characters shown when viewing an answer',
+        completionDetailCharsHint:
+          'When /detail shows an answer, this is the maximum number of characters. The full answer stays in DSH. 0 means no limit.',
         settleMs: 'Reply merge window (ms)',
         settleMsHint:
           'Gaps smaller than this merge into one message. Larger is more complete but slower; smaller is faster but may split.',
@@ -477,6 +492,7 @@ window.__ModuleLoader__.load({
         commandNew: 'Start a new conversation, optionally titled',
         commandList: 'List every conversation',
         commandSwitch: 'Move to conversation number N',
+        commandDetail: 'Show the answer of a finished task; latest when no id is given',
         commandModel: 'List the models and their reasoning levels; add a name or number to switch. Level only: /model level high',
         commandCurrent: 'Show the conversation in use',
         commandCancel: 'Interrupt the running task',
@@ -1578,6 +1594,30 @@ a.dsh-qq-button { text-decoration: none; }
                     }),
                   ),
 
+                  /*
+                   * Completion notices: a narrower switch than the cross-session one above.
+                   *
+                   * On by default, like allowCrossSessionNotify and for the same reason: a notice
+                   * nobody hears is a notice that does not exist. The check is "!== false", not
+                   * "=== true", so a host whose payload predates this key renders it as on.
+                   */
+                  h(
+                    'div',
+                    { className: 'dsh-qq-row' },
+                    h(
+                      'div',
+                      { className: 'dsh-qq-row-text' },
+                      h('label', null, t.completionNotify),
+                      h('span', { className: 'dsh-qq-hint' }, t.completionNotifyHint),
+                    ),
+                    h(Toggle, {
+                      checked: draft.completionNotify !== false,
+                      label: t.completionNotify,
+                      disabled: state.busy,
+                      onChange: (next) => edit('completionNotify', next),
+                    }),
+                  ),
+
                   h(
                     'div',
                     { className: 'dsh-qq-row' },
@@ -1637,6 +1677,27 @@ a.dsh-qq-button { text-decoration: none; }
                       className: 'dsh-qq-input',
                       value: Number.isFinite(draft.maxReplyChars) ? draft.maxReplyChars : 0,
                       onChange: (event) => editNumber('maxReplyChars', event.target.value),
+                    }),
+                  ),
+
+                  /*
+                   * How much of the answer the completion notice shows.
+                   *
+                   * Placed after the merge-window input on purpose: scripts/verify-client.mjs
+                   * section 8a takes the FIRST input[type=number] in the tree as the merge-window
+                   * field, so a new numeric control must not precede it.
+                   */
+                  field(
+                    t.completionDetailChars,
+                    t.completionDetailCharsHint,
+                    h('input', {
+                      type: 'number',
+                      min: 0,
+                      className: 'dsh-qq-input',
+                      value: Number.isFinite(draft.completionDetailChars)
+                        ? draft.completionDetailChars
+                        : 0,
+                      onChange: (event) => editNumber('completionDetailChars', event.target.value),
                     }),
                   ),
 
@@ -1812,6 +1873,7 @@ a.dsh-qq-button { text-decoration: none; }
                 h('div', { className: 'dsh-qq-command' }, h('dt', null, '/new [标题]'), h('dd', null, t.commandNew)),
                 h('div', { className: 'dsh-qq-command' }, h('dt', null, '/list'), h('dd', null, t.commandList)),
                 h('div', { className: 'dsh-qq-command' }, h('dt', null, '/switch <编号>'), h('dd', null, t.commandSwitch)),
+                h('div', { className: 'dsh-qq-command' }, h('dt', null, '/detail <行尾 id>'), h('dd', null, t.commandDetail)),
                 h('div', { className: 'dsh-qq-command' }, h('dt', null, '/model [名字]'), h('dd', null, t.commandModel)),
                 h('div', { className: 'dsh-qq-command' }, h('dt', null, '/current'), h('dd', null, t.commandCurrent)),
                 h('div', { className: 'dsh-qq-command' }, h('dt', null, '/cancel'), h('dd', null, t.commandCancel)),
